@@ -234,7 +234,7 @@ for day in range(transactions_df.TX_TIME_DAYS.max() + 1):
     
     # Format the filename based on the date
     date = start_date + datetime.timedelta(days=day)
-    filename_output = date.strftime("%Y-%m-%d") + '.parquet'
+    filename_output = date.strftime("%Y-%m-%d") + '.csv'
     
     # Save as Parquet
-    transactions_day.to_parquet(os.path.join(DIR_OUTPUT, filename_output), index=False)
+    transactions_day.to_csv(os.path.join(DIR_OUTPUT, filename_output), index=False)
