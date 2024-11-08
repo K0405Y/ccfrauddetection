@@ -6,8 +6,8 @@ from src.preprocessing.prep import TransactionPreprocessor
 import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import StratifiedKFold, cross_val_score, train_test_split
-from sklearn.metrics import classification_report,roc_auc_score
+from sklearn.model_selection import  train_test_split
+from sklearn.metrics import roc_auc_score, precision_score, accuracy_score, recall_score, f1_score
 import xgboost as xgb
 import torch
 import torch.nn as nn 
@@ -160,7 +160,7 @@ class FraudDetectionEnsemble:
     def train(self, X_train, y_train, X_val=None, y_val=None):
         print(f"Training ensemble with input dimension: {self.input_dim}")
         mlflow.set_tracking_uri("databricks")
-        mlflow.set_experiment("/Users/kehinde.awomuti@pwc.com/Testrun")
+        mlflow.set_experiment("/Users/kehinde.awomuti@pwc.com/fraud_detection_train")
 
         # Start MLflow run
         with mlflow.start_run(run_name="fraud_detection_ensemble"):
@@ -358,8 +358,16 @@ def train_fraud_detection_system(raw_data, test_size=0.2):
         mlflow.log_metrics({
             'xgb_train_auc': roc_auc_score(y_train, xgb_train_pred),
             'xgb_val_auc': roc_auc_score(y_val, xgb_val_pred),
+            'xgb_train_accuracy': accuracy_score(y_train, xgb_train_pred),
+            'xgb_val_accuracy': accuracy_score(y_val, xgb_val_pred),
+            'xgb_train_precision': precision_score(y_train, xgb_train_pred),
+            'xgb_val_precision': precision_score(y_val, xgb_val_pred),
+            'xgb_train_recall': recall_score(y_train, xgb_train_pred),
+            'xgb_val_recall': recall_score(y_val, xgb_val_pred),
+            'xgb_train_f1': f1_score(y_train, xgb_train_pred),
+            'xgb_val_f1': f1_score(y_val, xgb_val_pred)
         })
-        mlflow.sklearn.log_model(ensemble.xgb_model, "xgboost_model")
+        mlflow.sklearn.log_model(ensemble.xgb_model, "xgboost_model", registered_model_name = 'xgb_model')
         
         # Train and log Random Forest
         print("Training Random Forest...")
@@ -371,8 +379,15 @@ def train_fraud_detection_system(raw_data, test_size=0.2):
         mlflow.log_metrics({
             'rf_train_auc': roc_auc_score(y_train, rf_train_pred),
             'rf_val_auc': roc_auc_score(y_val, rf_val_pred),
+            'rf_train_accuracy': accuracy_score(y_train, rf_train_pred),
+            'rf_val_accuracy': accuracy_score(y_val, rf_val_pred),
+            'rf_train_precision': precision_score(y_train, rf_train_pred),
+            'rf_val_precision': precision_score(y_val, rf_val_pred),
+            'rf_train_recall': recall_score(y_train, rf_train_pred),
+            'rf_train_f1': f1_score(y_train, rf_train_pred),
+            'rf_val_f1': f1_score(y_val, rf_val_pred)
         })
-        mlflow.sklearn.log_model(ensemble.rf_model, "random_forest_model")
+        mlflow.sklearn.log_model(ensemble.rf_model, "random_forest_model", registered_model_name = 'rf_model')
         
         # Train and log Neural Network
         print("Training Neural Network...")
@@ -406,14 +421,21 @@ def train_fraud_detection_system(raw_data, test_size=0.2):
                     mlflow.log_metrics({
                         'nn_train_auc': roc_auc_score(y_train, nn_train_pred),
                         'nn_val_auc': roc_auc_score(y_val, nn_val_pred),
+                        'nn_train_accuracy': accuracy_score(y_train, nn_train_pred),
+                        'nn_val_accuracy': accuracy_score(y_val, nn_val_pred),
+                        'nn_train_precision': precision_score(y_train, nn_train_pred),
+                        'nn_val_precision': precision_score(y_val, nn_val_pred),
+                        'nn_train_recall': recall_score(y_train, nn_train_pred),
+                        'nn_val_recall': recall_score(y_val, nn_val_pred),
+                        'nn_train_f1': f1_score(y_train, nn_train_pred),
+                        'nn_val_f1': f1_score(y_val, nn_val_pred)
                     })
-            
             mlflow.log_metrics({
                 f'nn_train_loss': loss.item(),
                 f'nn_val_loss': val_loss.item()
             }, step=epoch)
         
-        mlflow.pytorch.log_model(ensemble.nn_model, "pytorch_model")
+        mlflow.pytorch.log_model(ensemble.nn_model, "pytorch_model", registered_model_name = 'pytorch_model')
         
         # Log feature dimensions
         feature_dims = {group: features.shape[1] for group, features in feature_groups.items()}
