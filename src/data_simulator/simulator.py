@@ -75,7 +75,7 @@ def get_list_terminals_within_radius(customer_profile, x_y_terminals, r):
     # Return the list of terminal IDs
     return available_terminals
 
-def generate_transactions_table(customer_profile, start_date = "2024-10-29", nb_days = 20):
+def generate_transactions_table(customer_profile, start_date = "2024-10-29", nb_days = 10):
     
     customer_transactions = []
     
@@ -125,7 +125,7 @@ def generate_transactions_table(customer_profile, start_date = "2024-10-29", nb_
     
     return customer_transactions  
     
-def generate_dataset(n_customers = 10000, n_terminals = 400, nb_days=90, start_date="2024-10-29", r=15):
+def generate_dataset(n_customers = 2000, n_terminals = 800, nb_days=10, start_date="2024-10-29", r=15):
     
     start_time=time.time()
     customer_profiles_table = generate_customer_profiles_table(n_customers, random_state = 0)
@@ -212,15 +212,15 @@ def add_frauds(customer_profiles_table, terminal_profiles_table, transactions_df
     return transactions_df                 
 
 (customer_profiles_table, terminal_profiles_table, transactions_df)=\
-    generate_dataset(n_customers = 20000, 
-                     n_terminals = 40000, 
-                     nb_days=100, 
+    generate_dataset(n_customers = 4000, 
+                     n_terminals = 800, 
+                     nb_days=20, 
                      start_date="2024-10-29", 
                      r=5)
 
 transactions_df = add_frauds(customer_profiles_table, terminal_profiles_table, transactions_df)
 
-DIR_OUTPUT = "C:/ccfrauddetection/data/"
+DIR_OUTPUT = "/Workspace/Users/kehinde.awomuti@pwc.com/ccfrauddetection/data"
 
 if not os.path.exists(DIR_OUTPUT):
     os.makedirs(DIR_OUTPUT)

@@ -1,7 +1,7 @@
 import sys
 import os
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-sys.path.append(project_root)
+# project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+# sys.path.append(project_root)
 from src.preprocessing.prep import TransactionPreprocessor
 import pandas as pd
 import numpy as np
@@ -420,7 +420,6 @@ def train_fraud_detection_system(raw_data, test_size=0.2):
         mlflow.log_dict(feature_dims, 'feature_dimensions.json')
         
         # Log example input
-        # Log simplified input example
         example_input = {
             "TRANSACTION_ID": 4781,
             "TX_DATETIME": "2024-10-29 05:57:40",
@@ -438,7 +437,7 @@ def train_fraud_detection_system(raw_data, test_size=0.2):
 
 
 # Define the directory containing the files
-directory = 'C:/ccfrauddetection/data/'
+directory = '/Workspace/Users/kehinde.awomuti@pwc.com/ccfrauddetection/data'
 
 # List to store DataFrames
 df_list = []
@@ -452,13 +451,11 @@ for filename in os.listdir(directory):
 
 # Concatenate all DataFrames into a single DataFrame
 combined_df = pd.concat(df_list, ignore_index=True)
-pos_df = combined_df[combined_df['TX_FRAUD']== 1].iloc[1:100]
-neg_df = combined_df[combined_df['TX_FRAUD'] == 0].iloc[1:10]
-df2 = pd.concat([pos_df,neg_df], axis=0) 
-
-print(df2.head())
-print(df2.tail())
+print(f"dimension of fraud cases --{combined_df[combined_df['TX_FRAUD']== 1].shape}")
+print(f"dimension of non fraud cases --{combined_df[combined_df['TX_FRAUD'] == 0].shape}")
+# df2 = pd.concat([pos_df,neg_df], axis=0) 
 
 import warnings
 warnings.filterwarnings("ignore")
-preprocessor, ensemble = train_fraud_detection_system(df2)
+print(combined_df.shape)
+preprocessor, ensemble = train_fraud_detection_system(combined_df)

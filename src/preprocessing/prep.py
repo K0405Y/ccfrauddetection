@@ -362,22 +362,22 @@ class TransactionPreprocessor:
         
         return scaled_features
 
-# Define the directory containing the files
-directory = 'C:/ccfrauddetection/data/'
+# # Define the directory containing the files
+# directory = 'C:/ccfrauddetection/data/'
 
-# List to store DataFrames
-df_list = []
+# # List to store DataFrames
+# df_list = []
 
-# Iterate over files in the directory
-for filename in os.listdir(directory):
-    if filename.endswith('.csv'):
-        file_path = os.path.join(directory, filename)
-        df = pd.read_csv(file_path)
-        df_list.append(df)
+# # Iterate over files in the directory
+# for filename in os.listdir(directory):
+#     if filename.endswith('.csv'):
+#         file_path = os.path.join(directory, filename)
+#         df = pd.read_csv(file_path)
+#         df_list.append(df)
 
-# Concatenate all DataFrames into a single DataFrame
-combined_df = pd.concat(df_list, ignore_index=True)
+# # Concatenate all DataFrames into a single DataFrame
+# combined_df = pd.concat(df_list, ignore_index=True)
 
-processed_data = TransactionPreprocessor()
+# processed_data = TransactionPreprocessor()
 
 
