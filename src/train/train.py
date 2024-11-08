@@ -38,38 +38,38 @@ class FraudDetectionNN(nn.Module):
     def forward(self, x):
         return self.model(x)
     
-# Custom inference logic for real-time predictions
-class FraudDetectionInference:
-    def __init__(self, ensemble_model, scaler, feature_cols):
-        self.model = ensemble_model
-        self.scaler = scaler
-        self.feature_cols = feature_cols
+# # Custom inference logic for real-time predictions
+# class FraudDetectionInference:
+#     def __init__(self, ensemble_model, scaler, feature_cols):
+#         self.model = ensemble_model
+#         self.scaler = scaler
+#         self.feature_cols = feature_cols
     
-    def preprocess(self, transaction_data):
-        # Extract relevant features
-        features = pd.DataFrame([transaction_data])
-        features = features[self.feature_cols]
+#     def preprocess(self, transaction_data):
+#         # Extract relevant features
+#         features = pd.DataFrame([transaction_data])
+#         features = features[self.feature_cols]
         
-        # Scale features
-        features_scaled = self.scaler.transform(features)
-        return pd.DataFrame(features_scaled, columns=self.feature_cols)
+#         # Scale features
+#         features_scaled = self.scaler.transform(features)
+#         return pd.DataFrame(features_scaled, columns=self.feature_cols)
     
-    def predict_transaction(self, transaction_data):
-        # Preprocess the transaction
-        processed_data = self.preprocess(transaction_data)
+#     def predict_transaction(self, transaction_data):
+#         # Preprocess the transaction
+#         processed_data = self.preprocess(transaction_data)
         
-        # Get model prediction
-        fraud_probability = self.model.predict_proba(processed_data)[0]
+#         # Get model prediction
+#         fraud_probability = self.model.predict_proba(processed_data)[0]
         
-        # Add custom business logic
-        result = {
-            'fraud_probability': float(fraud_probability),
-            'is_fraud': bool(fraud_probability >= 0.5),
-            'confidence': 'high' if abs(fraud_probability - 0.5) > 0.3 else 'low',
-            'timestamp': pd.Timestamp.now()
-        }
+#         # Add custom business logic
+#         result = {
+#             'fraud_probability': float(fraud_probability),
+#             'is_fraud': bool(fraud_probability >= 0.5),
+#             'confidence': 'high' if abs(fraud_probability - 0.5) > 0.3 else 'low',
+#             'timestamp': pd.Timestamp.now()
+#         }
         
-        return result
+#         return result
 
 class ModelInterpretability:
     def __init__(self, model, feature_names):
@@ -134,111 +134,17 @@ class ModelInterpretability:
         
         return explanation
 
-class CrossValidationManager:
-    def __init__(self, n_splits=5, random_state=42):
-        self.n_splits = n_splits
-        self.random_state = random_state
-        self.cv_results = {}
-        
-    def perform_cv(self, model, feature_groups, labels):
-        """Perform cross-validation"""
-        skf = StratifiedKFold(n_splits=self.n_splits, shuffle=True, random_state=self.random_state)
-        
-        # Initialize metrics storage
-        metrics = {
-            'auc_scores': [],
-            'precision_scores': [],
-            'recall_scores': [],
-            'f1_scores': []
-        }
-        
-        # Feature importance across folds
-        feature_importance_folds = []
-        
-        for fold, (train_idx, val_idx) in enumerate(skf.split(
-            next(iter(feature_groups.values())), labels
-        )):
-            # Split data for this fold
-            fold_feature_groups = {
-                name: features[train_idx] 
-                for name, features in feature_groups.items()
-            }
-            fold_val_feature_groups = {
-                name: features[val_idx]
-                for name, features in feature_groups.items()
-            }
-            fold_labels = labels[train_idx]
-            fold_val_labels = labels[val_idx]
-            
-            # Train model
-            model.train(
-                fold_feature_groups,
-                fold_labels,
-                fold_val_feature_groups,
-                fold_val_labels
-            )
-            
-            # Get predictions
-            val_probs = model.predict_proba(fold_val_feature_groups)
-            val_preds = (val_probs >= 0.5).astype(int)
-            
-            # Calculate metrics
-            metrics['auc_scores'].append(
-                roc_auc_score(fold_val_labels, val_probs)
-            )
-            report = classification_report(fold_val_labels, val_preds, output_dict=True)
-            metrics['precision_scores'].append(report['1']['precision'])
-            metrics['recall_scores'].append(report['1']['recall'])
-            metrics['f1_scores'].append(report['1']['f1-score'])
-            
-            # Get feature importance for this fold
-            fold_importance = model.get_feature_importance()
-            feature_importance_folds.append(fold_importance)
-            
-            # Log to MLflow
-            with mlflow.start_run(nested=True):
-                mlflow.log_metrics({
-                    f'fold_{fold}_auc': metrics['auc_scores'][-1],
-                    f'fold_{fold}_precision': metrics['precision_scores'][-1],
-                    f'fold_{fold}_recall': metrics['recall_scores'][-1],
-                    f'fold_{fold}_f1': metrics['f1_scores'][-1]
-                })
-        
-        # Calculate aggregate metrics
-        self.cv_results = {
-            'mean_auc': np.mean(metrics['auc_scores']),
-            'std_auc': np.std(metrics['auc_scores']),
-            'mean_precision': np.mean(metrics['precision_scores']),
-            'mean_recall': np.mean(metrics['recall_scores']),
-            'mean_f1': np.mean(metrics['f1_scores']),
-            'feature_importance': self._aggregate_feature_importance(feature_importance_folds)
-        }
-        
-        return self.cv_results
-    
-    def _aggregate_feature_importance(self, importance_folds):
-        """Aggregate feature importance across folds"""
-        all_features = set()
-        for fold_importance in importance_folds:
-            all_features.update(fold_importance.keys())
-        
-        aggregated = {}
-        for feature in all_features:
-            values = [fold.get(feature, 0) for fold in importance_folds]
-            aggregated[feature] = {
-                'mean': float(np.mean(values)),
-                'std': float(np.std(values))
-            }
-        
-        return aggregated
-
 class FraudDetectionEnsemble:
     def __init__(self, input_dim, weights=[0.4, 0.3, 0.3]):
+        self.input_dim = input_dim
         self.xgb_model = xgb.XGBClassifier(
-            scale_pos_weight=10,  # Handling imbalance
+            scale_pos_weight=10,
             max_depth=5,
             learning_rate=0.1,
-            n_estimators=100
+            n_estimators=100,
+            eval_metric='auc',  
+            use_label_encoder=False,
+            # early_stopping_rounds=10,
         )
         
         self.rf_model = RandomForestClassifier(
@@ -250,17 +156,25 @@ class FraudDetectionEnsemble:
         
         self.nn_model = FraudDetectionNN(input_dim)
         self.weights = weights
-        
-    def train(self, X_train, y_train, X_val, y_val):
+    
+    def train(self, X_train, y_train, X_val=None, y_val=None):
+        print(f"Training ensemble with input dimension: {self.input_dim}")
+        mlflow.set_tracking_uri("databricks")
+        mlflow.set_experiment("/Users/kehinde.awomuti@pwc.com/Testrun")
+
         # Start MLflow run
         with mlflow.start_run(run_name="fraud_detection_ensemble"):
             # Train XGBoost
-            self.xgb_model.fit(
-                X_train, y_train,
-                eval_set=[(X_val, y_val)],
-                eval_metric='auc',
-                early_stopping_rounds=10
-            )
+            if X_val is not None:
+                eval_set = [(X_train, y_train), (X_val, y_val)]
+                self.xgb_model.fit(
+                    X_train, y_train,
+                    eval_set=eval_set,
+                    verbose=False
+                )
+            else:
+                self.xgb_model.fit(X_train, y_train)
+            
             mlflow.sklearn.log_model(self.xgb_model, "xgboost_model")
             
             # Train Random Forest
@@ -268,8 +182,8 @@ class FraudDetectionEnsemble:
             mlflow.sklearn.log_model(self.rf_model, "random_forest_model")
             
             # Train Neural Network
-            X_train_tensor = torch.FloatTensor(X_train.values)
-            y_train_tensor = torch.FloatTensor(y_train.values).reshape(-1, 1)
+            X_train_tensor = torch.FloatTensor(X_train)
+            y_train_tensor = torch.FloatTensor(y_train).reshape(-1, 1)
             
             criterion = nn.BCELoss()
             optimizer = torch.optim.Adam(self.nn_model.parameters(), lr=0.001)
@@ -295,7 +209,7 @@ class FraudDetectionEnsemble:
         # Neural Network prediction
         self.nn_model.eval()
         with torch.no_grad():
-            X_tensor = torch.FloatTensor(X.values)
+            X_tensor = torch.FloatTensor(X)
             nn_pred = self.nn_model(X_tensor).numpy().flatten()
         
         # Weighted ensemble prediction
@@ -383,40 +297,168 @@ class FraudDetectionInference:
         
         return result
 
-def train_fraud_detection_system(raw_data):
-    # Initialize components
-    preprocessor = TransactionPreprocessor()
-    cv_manager = CrossValidationManager(n_splits=5)
+def train_fraud_detection_system(raw_data, test_size=0.2):
+    print("Starting fraud detection system training...")
     
-    # Preprocess data
+    # Initialize preprocessor
+    preprocessor = TransactionPreprocessor()
+    
+    # Preprocess all data
+    print("Preprocessing data...")
     feature_groups, labels = preprocessor.transform(raw_data, training=True)
     
-    # Get feature dimensions
-    feature_dims = {
-        group: features.shape[1] 
-        for group, features in feature_groups.items()
-    }
+    # Convert feature groups dictionary to numpy array
+    X = np.concatenate([feature_groups[group] for group in sorted(feature_groups.keys())], axis=1)
+    y = labels
+    
+    # Split into train/validation sets
+    X_train, X_val, y_train, y_val = train_test_split(
+        X, y, test_size=test_size, random_state=42, stratify=y
+    )
+    
+    # Print data statistics
+    print(f"\nData statistics:")
+    print(f"Total samples: {len(X)}")
+    print(f"Training samples: {len(X_train)}")
+    print(f"Validation samples: {len(X_val)}")
+    print(f"Feature dimension: {X.shape[1]}")
+    print(f"Class distribution: {np.bincount(y)}")
+    print(f"Class balance: {np.mean(y):.3f}")
+    print(f"\nFeature groups: {sorted(feature_groups.keys())}")
     
     # Initialize ensemble
-    ensemble = FraudDetectionEnsemble(feature_dims)
+    input_dim = X.shape[1]
+    ensemble = FraudDetectionEnsemble(input_dim=input_dim)
     
-    # Perform cross-validation
-    cv_results = cv_manager.perform_cv(ensemble, feature_groups, labels)
+    # Set up MLflow tracking
+    mlflow.set_tracking_uri("databricks")
+    mlflow.set_experiment("/Users/kehinde.awomuti@pwc.com/Testrun")
     
-    # Train final model on full dataset
-    ensemble.train(feature_groups, labels)
-    
-    # Log final results to MLflow
-    with mlflow.start_run():
-        mlflow.log_metrics({
-            'final_cv_mean_auc': cv_results['mean_auc'],
-            'final_cv_mean_f1': cv_results['mean_f1']
+    # Train and log metrics
+    with mlflow.start_run(run_name="fraud_detection_ensemble"):
+        # Log dataset info
+        mlflow.log_params({
+            'total_samples': len(X),
+            'feature_dimension': X.shape[1],
+            'class_balance': float(np.mean(y)),
+            'test_size': test_size
         })
         
-        # Log feature importance
-        mlflow.log_dict(
-            cv_results['feature_importance'],
-            'feature_importance.json'
+        # Train and log XGBoost
+        print("\nTraining XGBoost...")
+        ensemble.xgb_model.fit(
+            X_train, y_train,
+            eval_set=[(X_train, y_train), (X_val, y_val)],
+            verbose=False
         )
+        
+        xgb_train_pred = ensemble.xgb_model.predict_proba(X_train)[:, 1]
+        xgb_val_pred = ensemble.xgb_model.predict_proba(X_val)[:, 1]
+        
+        mlflow.log_metrics({
+            'xgb_train_auc': roc_auc_score(y_train, xgb_train_pred),
+            'xgb_val_auc': roc_auc_score(y_val, xgb_val_pred),
+        })
+        mlflow.sklearn.log_model(ensemble.xgb_model, "xgboost_model")
+        
+        # Train and log Random Forest
+        print("Training Random Forest...")
+        ensemble.rf_model.fit(X_train, y_train)
+        
+        rf_train_pred = ensemble.rf_model.predict_proba(X_train)[:, 1]
+        rf_val_pred = ensemble.rf_model.predict_proba(X_val)[:, 1]
+        
+        mlflow.log_metrics({
+            'rf_train_auc': roc_auc_score(y_train, rf_train_pred),
+            'rf_val_auc': roc_auc_score(y_val, rf_val_pred),
+        })
+        mlflow.sklearn.log_model(ensemble.rf_model, "random_forest_model")
+        
+        # Train and log Neural Network
+        print("Training Neural Network...")
+        X_train_tensor = torch.FloatTensor(X_train)
+        y_train_tensor = torch.FloatTensor(y_train).reshape(-1, 1)
+        X_val_tensor = torch.FloatTensor(X_val)
+        y_val_tensor = torch.FloatTensor(y_val).reshape(-1, 1)
+        
+        criterion = nn.BCELoss()
+        optimizer = torch.optim.Adam(ensemble.nn_model.parameters(), lr=0.001)
+        
+        for epoch in range(10):
+            # Training step
+            ensemble.nn_model.train()
+            optimizer.zero_grad()
+            outputs = ensemble.nn_model(X_train_tensor)
+            loss = criterion(outputs, y_train_tensor)
+            loss.backward()
+            optimizer.step()
+            
+            # Validation step
+            ensemble.nn_model.eval()
+            with torch.no_grad():
+                val_outputs = ensemble.nn_model(X_val_tensor)
+                val_loss = criterion(val_outputs, y_val_tensor)
+                
+                # Calculate AUC for neural network
+                if epoch == 9:  # Only on last epoch
+                    nn_train_pred = outputs.numpy()
+                    nn_val_pred = val_outputs.numpy()
+                    mlflow.log_metrics({
+                        'nn_train_auc': roc_auc_score(y_train, nn_train_pred),
+                        'nn_val_auc': roc_auc_score(y_val, nn_val_pred),
+                    })
+            
+            mlflow.log_metrics({
+                f'nn_train_loss': loss.item(),
+                f'nn_val_loss': val_loss.item()
+            }, step=epoch)
+        
+        mlflow.pytorch.log_model(ensemble.nn_model, "pytorch_model")
+        
+        # Log feature dimensions
+        feature_dims = {group: features.shape[1] for group, features in feature_groups.items()}
+        mlflow.log_dict(feature_dims, 'feature_dimensions.json')
+        
+        # Log example input
+        # Log simplified input example
+        example_input = {
+            "TRANSACTION_ID": 4781,
+            "TX_DATETIME": "2024-10-29 05:57:40",
+            "CUSTOMER_ID": 17085,
+            "TERMINAL_ID": 139,
+            "TX_AMOUNT": 251.25,
+            "TX_TIME_SECONDS": 21460,
+            "TX_TIME_DAYS": 0
+        }
+        mlflow.log_dict(example_input, "input_example.json")
     
-    return preprocessor, ensemble, cv_results
+    print("Training completed successfully!")
+    return preprocessor, ensemble
+
+
+
+# Define the directory containing the files
+directory = 'C:/ccfrauddetection/data/'
+
+# List to store DataFrames
+df_list = []
+
+# Iterate over files in the directory
+for filename in os.listdir(directory):
+    if filename.endswith('.csv'):
+        file_path = os.path.join(directory, filename)
+        df = pd.read_csv(file_path)
+        df_list.append(df)
+
+# Concatenate all DataFrames into a single DataFrame
+combined_df = pd.concat(df_list, ignore_index=True)
+pos_df = combined_df[combined_df['TX_FRAUD']== 1].iloc[1:100]
+neg_df = combined_df[combined_df['TX_FRAUD'] == 0].iloc[1:10]
+df2 = pd.concat([pos_df,neg_df], axis=0) 
+
+print(df2.head())
+print(df2.tail())
+
+import warnings
+warnings.filterwarnings("ignore")
+preprocessor, ensemble = train_fraud_detection_system(df2)

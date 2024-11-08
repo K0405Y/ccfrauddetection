@@ -378,7 +378,6 @@ for filename in os.listdir(directory):
 # Concatenate all DataFrames into a single DataFrame
 combined_df = pd.concat(df_list, ignore_index=True)
 
-
 processed_data = TransactionPreprocessor()
 
 
