@@ -1,7 +1,5 @@
 import sys
 import os
-# project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-# sys.path.append(project_root)
 from src.preprocessing.prep import TransactionPreprocessor
 import pandas as pd
 import numpy as np
@@ -38,102 +36,6 @@ class FraudDetectionNN(nn.Module):
     def forward(self, x):
         return self.model(x)
     
-# # Custom inference logic for real-time predictions
-# class FraudDetectionInference:
-#     def __init__(self, ensemble_model, scaler, feature_cols):
-#         self.model = ensemble_model
-#         self.scaler = scaler
-#         self.feature_cols = feature_cols
-    
-#     def preprocess(self, transaction_data):
-#         # Extract relevant features
-#         features = pd.DataFrame([transaction_data])
-#         features = features[self.feature_cols]
-        
-#         # Scale features
-#         features_scaled = self.scaler.transform(features)
-#         return pd.DataFrame(features_scaled, columns=self.feature_cols)
-    
-#     def predict_transaction(self, transaction_data):
-#         # Preprocess the transaction
-#         processed_data = self.preprocess(transaction_data)
-        
-#         # Get model prediction
-#         fraud_probability = self.model.predict_proba(processed_data)[0]
-        
-#         # Add custom business logic
-#         result = {
-#             'fraud_probability': float(fraud_probability),
-#             'is_fraud': bool(fraud_probability >= 0.5),
-#             'confidence': 'high' if abs(fraud_probability - 0.5) > 0.3 else 'low',
-#             'timestamp': pd.Timestamp.now()
-#         }
-        
-#         return result
-
-class ModelInterpretability:
-    def __init__(self, model, feature_names):
-        self.model = model
-        self.feature_names = feature_names
-        self.shap_values = None
-        
-    def compute_shap_values(self, X, sample_size=100):
-        """Compute SHAP values for feature importance"""
-        if isinstance(self.model, xgb.XGBClassifier):
-            explainer = shap.TreeExplainer(self.model)
-        else:
-            # For neural network, use KernelExplainer
-            sample_data = shap.sample(X, sample_size)
-            explainer = shap.KernelExplainer(self.model.predict_proba, sample_data)
-        
-        self.shap_values = explainer.shap_values(X)
-        return self.shap_values
-    
-    def get_feature_importance(self, X):
-        """Get global feature importance"""
-        importance_dict = {}
-        
-        if isinstance(self.model, (RandomForestClassifier, xgb.XGBClassifier)):
-            # For tree-based models
-            importances = self.model.feature_importances_
-            for name, importance in zip(self.feature_names, importances):
-                importance_dict[name] = float(importance)
-                
-        elif isinstance(self.model, FraudDetectionNN):
-            # For neural network using integrated gradients
-            ig = IntegratedGradients(self.model)
-            attributions = ig.attribute(X, target=1)
-            importances = torch.mean(torch.abs(attributions), dim=0)
-            
-            for name, importance in zip(self.feature_names, importances):
-                importance_dict[name] = float(importance)
-        
-        return importance_dict
-    
-    def explain_prediction(self, instance, num_features=10):
-        """Explain a single prediction"""
-        if self.shap_values is None:
-            self.compute_shap_values(instance.reshape(1, -1))
-        
-        explanation = {
-            'feature_contributions': {},
-            'top_features': []
-        }
-        
-        # Get feature contributions
-        for i, name in enumerate(self.feature_names):
-            explanation['feature_contributions'][name] = float(self.shap_values[0][i])
-        
-        # Get top contributing features
-        sorted_features = sorted(
-            explanation['feature_contributions'].items(),
-            key=lambda x: abs(x[1]),
-            reverse=True
-        )
-        explanation['top_features'] = sorted_features[:num_features]
-        
-        return explanation
-
 class FraudDetectionEnsemble:
     def __init__(self, input_dim, weights=[0.4, 0.3, 0.3]):
         self.input_dim = input_dim
@@ -255,48 +157,6 @@ class FraudDetectionEnsemble:
         
         return importance_dict
 
-class FraudDetectionInference:
-    def __init__(self, ensemble_model, preprocessor):
-        self.model = ensemble_model
-        self.preprocessor = preprocessor
-        self.interpreter = ModelInterpretability(
-            model=ensemble_model,
-            feature_names=self.get_feature_names()
-        )
-    
-    def get_feature_names(self):
-        """Get list of all feature names"""
-        feature_names = []
-        for group, features in self.preprocessor.feature_groups.items():
-            feature_names.extend([f"{group}_{feature}" for feature in features])
-        return feature_names
-    
-    def predict_transaction(self, transaction_data):
-        # Process transaction
-        processed_features = self.preprocessor.transform(
-            pd.DataFrame([transaction_data]), training=False
-        )
-        
-        # Get prediction
-        fraud_probability = self.model.predict_proba(processed_features)[0]
-        
-        # Get prediction explanation
-        explanation = self.interpreter.explain_prediction(processed_features)
-        
-        # Prepare result
-        result = {
-            'fraud_probability': float(fraud_probability),
-            'is_fraud': bool(fraud_probability >= 0.5),
-            'confidence': 'high' if abs(fraud_probability - 0.5) > 0.3 else 'low',
-            'timestamp': pd.Timestamp.now(),
-            'explanation': {
-                'top_contributing_features': explanation['top_features'],
-                'feature_contributions': explanation['feature_contributions']
-            }
-        }
-        
-        return result
-
 def train_fraud_detection_system(raw_data, test_size=0.2):
     print("Starting fraud detection system training...")
     
@@ -316,7 +176,9 @@ def train_fraud_detection_system(raw_data, test_size=0.2):
         X, y, test_size=test_size, random_state=42, stratify=y
     )
     
-    # Print data statistics
+    print(X_train)
+    print(X_val)
+    # # Print data statistics
     print(f"\nData statistics:")
     print(f"Total samples: {len(X)}")
     print(f"Training samples: {len(X_train)}")
@@ -331,8 +193,8 @@ def train_fraud_detection_system(raw_data, test_size=0.2):
     ensemble = FraudDetectionEnsemble(input_dim=input_dim)
     
     # Set up MLflow tracking
-    mlflow.set_tracking_uri("databricks")
-    mlflow.set_experiment("/Users/kehinde.awomuti@pwc.com/Testrun")
+    # # mlflow.set_tracking_uri("databricks")
+    mlflow.set_experiment("/Users/kehinde.awomuti@pwc.com/fraud_detection_train")
     
     # Train and log metrics
     with mlflow.start_run(run_name="fraud_detection_ensemble"):
@@ -343,7 +205,7 @@ def train_fraud_detection_system(raw_data, test_size=0.2):
             'class_balance': float(np.mean(y)),
             'test_size': test_size
         })
-        
+
         # Train and log XGBoost
         print("\nTraining XGBoost...")
         ensemble.xgb_model.fit(
@@ -352,12 +214,14 @@ def train_fraud_detection_system(raw_data, test_size=0.2):
             verbose=False
         )
         
-        xgb_train_pred = ensemble.xgb_model.predict_proba(X_train)[:, 1]
-        xgb_val_pred = ensemble.xgb_model.predict_proba(X_val)[:, 1]
+        xgb_train_probs = ensemble.xgb_model.predict_proba(X_train)[:, 1]
+        xgb_val_probs = ensemble.xgb_model.predict_proba(X_val)[:, 1] 
+        xgb_train_pred = (xgb_train_probs >= 0.5).astype(int)
+        xgb_val_pred = (xgb_val_probs >= 0.5).astype(int)
         
         mlflow.log_metrics({
-            'xgb_train_auc': roc_auc_score(y_train, xgb_train_pred),
-            'xgb_val_auc': roc_auc_score(y_val, xgb_val_pred),
+            'xgb_train_auc': roc_auc_score(y_train, xgb_train_probs),
+            'xgb_val_auc': roc_auc_score(y_val, xgb_val_probs),
             'xgb_train_accuracy': accuracy_score(y_train, xgb_train_pred),
             'xgb_val_accuracy': accuracy_score(y_val, xgb_val_pred),
             'xgb_train_precision': precision_score(y_train, xgb_train_pred),
@@ -373,12 +237,14 @@ def train_fraud_detection_system(raw_data, test_size=0.2):
         print("Training Random Forest...")
         ensemble.rf_model.fit(X_train, y_train)
         
-        rf_train_pred = ensemble.rf_model.predict_proba(X_train)[:, 1]
-        rf_val_pred = ensemble.rf_model.predict_proba(X_val)[:, 1]
-        
+        rf_train_probs = ensemble.rf_model.predict_proba(X_train)[:, 1]
+        rf_val_probs = ensemble.rf_model.predict_proba(X_val)[:, 1]
+        rf_train_pred = (rf_train_probs >= 0.5).astype(int)
+        rf_val_pred = (rf_val_probs >= 0.5).astype(int)
+
         mlflow.log_metrics({
-            'rf_train_auc': roc_auc_score(y_train, rf_train_pred),
-            'rf_val_auc': roc_auc_score(y_val, rf_val_pred),
+            'rf_train_auc': roc_auc_score(y_train, rf_train_probs),
+            'rf_val_auc': roc_auc_score(y_val, rf_val_probs),
             'rf_train_accuracy': accuracy_score(y_train, rf_train_pred),
             'rf_val_accuracy': accuracy_score(y_val, rf_val_pred),
             'rf_train_precision': precision_score(y_train, rf_train_pred),
@@ -416,11 +282,14 @@ def train_fraud_detection_system(raw_data, test_size=0.2):
                 
                 # Calculate AUC for neural network
                 if epoch == 9:  # Only on last epoch
-                    nn_train_pred = outputs.numpy()
-                    nn_val_pred = val_outputs.numpy()
+                    nn_train_probs = outputs.numpy()
+                    nn_val_probs = val_outputs.numpy()
+                    nn_train_pred = (nn_train_probs >= 0.5).astype(int)
+                    nn_val_pred = (nn_val_probs >= 0.5).astype(int)
+                    
                     mlflow.log_metrics({
-                        'nn_train_auc': roc_auc_score(y_train, nn_train_pred),
-                        'nn_val_auc': roc_auc_score(y_val, nn_val_pred),
+                        'nn_train_auc': roc_auc_score(y_train, nn_train_probs),
+                        'nn_val_auc': roc_auc_score(y_val, nn_val_probs),
                         'nn_train_accuracy': accuracy_score(y_train, nn_train_pred),
                         'nn_val_accuracy': accuracy_score(y_val, nn_val_pred),
                         'nn_train_precision': precision_score(y_train, nn_train_pred),
@@ -454,9 +323,8 @@ def train_fraud_detection_system(raw_data, test_size=0.2):
         mlflow.log_dict(example_input, "input_example.json")
     
     print("Training completed successfully!")
+    # return X_train, y_train
     return preprocessor, ensemble
-
-
 
 # Define the directory containing the files
 directory = '/Workspace/Users/kehinde.awomuti@pwc.com/ccfrauddetection/data'
