@@ -176,9 +176,7 @@ def train_fraud_detection_system(raw_data, test_size=0.2):
         X, y, test_size=test_size, random_state=42, stratify=y
     )
     
-    print(X_train)
-    print(X_val)
-    # # Print data statistics
+    # Print data statistics
     print(f"\nData statistics:")
     print(f"Total samples: {len(X)}")
     print(f"Training samples: {len(X_train)}")
@@ -311,19 +309,17 @@ def train_fraud_detection_system(raw_data, test_size=0.2):
         mlflow.log_dict(feature_dims, 'feature_dimensions.json')
         
         # Log example input
-        example_input = {
-            "TRANSACTION_ID": 4781,
-            "TX_DATETIME": "2024-10-29 05:57:40",
-            "CUSTOMER_ID": 17085,
-            "TERMINAL_ID": 139,
-            "TX_AMOUNT": 251.25,
-            "TX_TIME_SECONDS": 21460,
-            "TX_TIME_DAYS": 0
+        input_example = X_train[:2, :]  
+
+        # Convert the slice to a dictionary format
+        input_example = {
+            f"row_{i+1}": {f"feature_{j+1}": value for j, value in enumerate(row)}
+            for i, row in enumerate(input_example)
         }
-        mlflow.log_dict(example_input, "input_example.json")
+        mlflow.log_dict(input_example, "input_example.json")
     
     print("Training completed successfully!")
-    # return X_train, y_train
+
     return preprocessor, ensemble
 
 # Define the directory containing the files
