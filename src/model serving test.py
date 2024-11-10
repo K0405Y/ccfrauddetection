@@ -1,7 +1,10 @@
 # Databricks notebook source
+import mlflow
 from mlflow.models import validate_serving_input
 import warnings 
 warnings.filterwarnings("ignore")
+from databricks.sdk import WorkspaceClient
+mlflow.set_tracking_uri("databricks")
 
 model_uri = 'runs:/44e32bbfe1e64329a925d0dc40441b7f/fraud_detection_inference'
 
@@ -10,15 +13,14 @@ model_uri = 'runs:/44e32bbfe1e64329a925d0dc40441b7f/fraud_detection_inference'
 # and saves it to 'serving_input_payload.json'
 serving_payload = """{
   "inputs": {
-    "TRANSACTION_ID": 4781,
-    "TX_DATETIME": "2024-10-29 05:57:40",
-    "CUSTOMER_ID": 17085,
-    "TERMINAL_ID": 139,
-    "TX_AMOUNT": 251.25,
-    "TX_TIME_SECONDS": 21460,
-    "TX_TIME_DAYS": 0
+    "TRANSACTION_ID": 53046,
+    "TX_DATETIME": "2024-11-05 00:31:30",
+    "CUSTOMER_ID": 158,
+    "TERMINAL_ID": 8,
+    "TX_AMOUNT": 77.62,
+    "TX_TIME_SECONDS": 606690,
+    "TX_TIME_DAYS": 7
   }
 }"""
-
 # Validate the serving payload works on the model
 validate_serving_input(model_uri, serving_payload)
