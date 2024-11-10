@@ -1,35 +1,35 @@
-# # Custom inference logic for real-time predictions
-# class FraudDetectionInference:
-#     def __init__(self, ensemble_model, scaler, feature_cols):
-#         self.model = ensemble_model
-#         self.scaler = scaler
-#         self.feature_cols = feature_cols
+# Custom inference logic for real-time predictions
+class FraudDetectionInference:
+    def __init__(self, ensemble_model, scaler, feature_cols):
+        self.model = ensemble_model
+        self.scaler = scaler
+        self.feature_cols = feature_cols
     
-#     def preprocess(self, transaction_data):
-#         # Extract relevant features
-#         features = pd.DataFrame([transaction_data])
-#         features = features[self.feature_cols]
+    def preprocess(self, transaction_data):
+        # Extract relevant features
+        features = pd.DataFrame([transaction_data])
+        features = features[self.feature_cols]
         
-#         # Scale features
-#         features_scaled = self.scaler.transform(features)
-#         return pd.DataFrame(features_scaled, columns=self.feature_cols)
+        # Scale features
+        features_scaled = self.scaler.transform(features)
+        return pd.DataFrame(features_scaled, columns=self.feature_cols)
     
-#     def predict_transaction(self, transaction_data):
-#         # Preprocess the transaction
-#         processed_data = self.preprocess(transaction_data)
+    def predict_transaction(self, transaction_data):
+        # Preprocess the transaction
+        processed_data = self.preprocess(transaction_data)
         
-#         # Get model prediction
-#         fraud_probability = self.model.predict_proba(processed_data)[0]
+        # Get model prediction
+        fraud_probability = self.model.predict_proba(processed_data)[0]
         
-#         # Add custom business logic
-#         result = {
-#             'fraud_probability': float(fraud_probability),
-#             'is_fraud': bool(fraud_probability >= 0.5),
-#             'confidence': 'high' if abs(fraud_probability - 0.5) > 0.3 else 'low',
-#             'timestamp': pd.Timestamp.now()
-#         }
+        # Add custom business logic
+        result = {
+            'fraud_probability': float(fraud_probability),
+            'is_fraud': bool(fraud_probability >= 0.5),
+            'confidence': 'high' if abs(fraud_probability - 0.5) > 0.3 else 'low',
+            'timestamp': pd.Timestamp.now()
+        }
         
-#         return result
+        return result
 
 class ModelInterpretability:
     def __init__(self, model, feature_names):
