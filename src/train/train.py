@@ -332,7 +332,7 @@ def train_fraud_detection_system(raw_data, test_size=0.2):
     feature_groups, labels = preprocessor.transform(raw_data, training=True)
 
     #save feature groups for inference purpose
-    with open('/Workspace/Users/kehinde.awomuti@pwc.com/ccfrauddetection/features/feature_groups.pkl', 'wb') as file:
+    with open('/Workspace/Users/**.**@**.com/ccfrauddetection/features/feature_groups.pkl', 'wb') as file:
         pkl.dump(feature_groups, file)
 
     # Convert feature groups to numpy array
@@ -357,7 +357,7 @@ def train_fraud_detection_system(raw_data, test_size=0.2):
     ensemble = FraudDetectionEnsemble(input_dim=X.shape[1])
     
     # Set up MLflow tracking
-    mlflow.set_experiment("/Users/kehinde.awomuti@pwc.com/fraud_detection_train")
+    mlflow.set_experiment("/Users/**.**@**.com/fraud_detection_train")
     
     with mlflow.start_run(run_name="fraud_detection_ensemble"):
         # Log dataset info
@@ -379,7 +379,7 @@ def train_fraud_detection_system(raw_data, test_size=0.2):
     return preprocessor, ensemble
 
 # Define the directory containing the files
-directory = '/Workspace/Users/kehinde.awomuti@pwc.com/ccfrauddetection/data'
+directory = '/Workspace/Users/**.**@**.com/ccfrauddetection/data'
 # List to store DataFrames
 df_list = []
 # Iterate over files in the directory
