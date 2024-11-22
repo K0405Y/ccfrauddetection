@@ -37,7 +37,27 @@ class FraudDetectionNN(nn.Module):
         )
     
     def forward(self, x):
-        return self.model(x)
+        pos_prob = self.model(x)
+        neg_prob = 1 - pos_prob
+        probs = torch.cat([pos_prob, neg_prob], dim=1)
+        return probs
+    
+class FraudDetectionNNWrapper(mlflow.pyfunc.PythonModel):
+    def __init__(self, model):
+        self.model = model
+        
+    def predict(self, context, model_input):
+        self.model.eval()
+        with torch.no_grad():
+            # Convert input to tensor if needed
+            if isinstance(model_input, pd.DataFrame):
+                X = torch.tensor(model_input.values, dtype=torch.float32)
+            else:
+                X = torch.tensor(model_input, dtype=torch.float32)    
+            # Get predictions
+            outputs = self.model(X)
+            probabilities = outputs.numpy()
+            return probabilities
     
 class FraudDetectionEnsemble:
     def __init__(self, input_dim, feature_names=None, weights=[0.4, 0.3, 0.3]):
@@ -173,11 +193,7 @@ class FraudDetectionEnsemble:
 
         # Log input example
         input_example = X_train[:1, :]  
-        # # Convert the slice to a dictionary format
-        # input_example = {
-        #     {i+1}: {{j+1}: value for j, value in enumerate(row)}
-        #     for i, row in enumerate(input_example)
-        # }
+
         signature = mlflow.models.infer_signature(input_example, self.rf_model.predict_proba(input_example))
         mlflow.sklearn.log_model(self.rf_model, "random_forest_model", registered_model_name='rf_model', signature = signature)
         mlflow.log_metrics(metrics)
@@ -200,7 +216,7 @@ class FraudDetectionEnsemble:
             self.nn_model.train()
             optimizer.zero_grad()
             outputs = self.nn_model(X_train_tensor)
-            loss = criterion(outputs, y_train_tensor)
+            loss = criterion(outputs[:, 1:], y_train_tensor)
             loss.backward()
             optimizer.step()
             
@@ -208,7 +224,7 @@ class FraudDetectionEnsemble:
             self.nn_model.eval()
             with torch.no_grad():
                 val_outputs = self.nn_model(X_val_tensor)
-                val_loss = criterion(val_outputs, y_val_tensor)
+                val_loss = criterion(val_outputs[:,1:], y_val_tensor)
                 
                 mlflow.log_metrics({
                     f'nn_train_loss': loss.item(),
@@ -216,8 +232,8 @@ class FraudDetectionEnsemble:
                 }, step=epoch)
                 
                 if epoch == epochs - 1:
-                    nn_train_probs = outputs.numpy()
-                    nn_val_probs = val_outputs.numpy()
+                    nn_train_probs = outputs[:, 1].numpy()
+                    nn_val_probs = val_outputs[:, 1].numpy()
                     nn_train_pred = (nn_train_probs >= 0.5).astype(int)
                     nn_val_pred = (nn_val_probs >= 0.5).astype(int)
                     
@@ -236,7 +252,7 @@ class FraudDetectionEnsemble:
         
         # Feature importance using Integrated Gradients
         ig = IntegratedGradients(self.nn_model)
-        attributions = ig.attribute(X_train_tensor[:100], target=0)  # Use subset for efficiency
+        attributions = ig.attribute(X_train_tensor[:100], target=1)  # Use subset for efficiency
         importance_dict = dict(zip(
             self.feature_names,
             np.mean(abs(attributions.detach().numpy()), axis=0)
@@ -256,17 +272,20 @@ class FraudDetectionEnsemble:
         mlflow.log_figure(plt.gcf(), "nn_feature_attribution.png")
         plt.close()
         
-        # Log input example
-        # input_example = torch.FloatTensor(X_train[:1, :])
-        # # Convert the slice to a dictionary format
-        # input_example = {
-        #     i+1: {j+1: value for j, value in enumerate(row)}
-        #     for i, row in enumerate(input_example)
-        # }
-        # signature = mlflow.models.infer_signature(input_example, self.nn_model(input_example))
-        mlflow.pytorch.log_model(self.nn_model, "pytorch_model", registered_model_name='pytorch_model')
-        mlflow.log_metrics(metrics)
+        wrapped_model = FraudDetectionNNWrapper(self.nn_model)
+        # Create an example input
+        example_input = X_train[:1]
+        signature = mlflow.models.infer_signature( example_input, 
+                                                  np.array([[0.43989954, 0.56010046]]))
         
+        # Log model with custom wrapper
+        mlflow.pyfunc.log_model(
+            artifact_path="pytorch_model",
+            python_model=wrapped_model,
+            signature = signature,
+            registered_model_name="pytorch_model"
+        )        
+
         return metrics, importance_dict
 
     def train(self, X_train, y_train, X_val, y_val):
@@ -332,7 +351,7 @@ def train_fraud_detection_system(raw_data, test_size=0.2):
     feature_groups, labels = preprocessor.transform(raw_data, training=True)
 
     #save feature groups for inference purpose
-    with open('/Workspace/Users/**.**@**.com/ccfrauddetection/features/feature_groups.pkl', 'wb') as file:
+    with open('/Workspace/Users/kehinde.awomuti@pwc.com/ccfrauddetection/features/feature_groups.pkl', 'wb') as file:
         pkl.dump(feature_groups, file)
 
     # Convert feature groups to numpy array
@@ -357,7 +376,7 @@ def train_fraud_detection_system(raw_data, test_size=0.2):
     ensemble = FraudDetectionEnsemble(input_dim=X.shape[1])
     
     # Set up MLflow tracking
-    mlflow.set_experiment("/Users/**.**@**.com/fraud_detection_train")
+    mlflow.set_experiment("/Users/kehinde.awomuti@pwc.com/fraud_detection_train")
     
     with mlflow.start_run(run_name="fraud_detection_ensemble"):
         # Log dataset info
@@ -379,7 +398,7 @@ def train_fraud_detection_system(raw_data, test_size=0.2):
     return preprocessor, ensemble
 
 # Define the directory containing the files
-directory = '/Workspace/Users/**.**@**.com/ccfrauddetection/data'
+directory = '/Workspace/Users/kehinde.awomuti@pwc.com/ccfrauddetection/data'
 # List to store DataFrames
 df_list = []
 # Iterate over files in the directory
@@ -391,9 +410,6 @@ for filename in os.listdir(directory):
 
 # Concatenate all DataFrames into a single DataFrame
 combined_df = pd.concat(df_list, ignore_index=True)
-# pos = combined_df[combined_df['TX_FRAUD'] == 1].iloc[:100]
-# neg = combined_df[combined_df['TX_FRAUD'] == 0].iloc[:10]
-# df2 = pd.concat([pos,neg], axis=0) 
 print(f"dimension of fraud cases --{combined_df[combined_df['TX_FRAUD']== 1].shape}")
 print(f"dimension of non fraud cases --{combined_df[combined_df['TX_FRAUD'] == 0].shape}")
 print(f"dimension of all cases --{combined_df.shape}")
