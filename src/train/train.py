@@ -39,7 +39,7 @@ class FraudDetectionNN(nn.Module):
     def forward(self, x):
         pos_prob = self.model(x)
         neg_prob = 1 - pos_prob
-        probs = torch.cat([pos_prob, neg_prob], dim=1)
+        probs = torch.cat([neg_prob, pos_prob], dim=1)
         return probs
     
 class FraudDetectionNNWrapper(mlflow.pyfunc.PythonModel):
@@ -49,16 +49,18 @@ class FraudDetectionNNWrapper(mlflow.pyfunc.PythonModel):
     def predict(self, context, model_input):
         self.model.eval()
         with torch.no_grad():
-            # Convert input to tensor if needed
+            # Convert input to tensor
             if isinstance(model_input, pd.DataFrame):
                 X = torch.tensor(model_input.values, dtype=torch.float32)
             else:
-                X = torch.tensor(model_input, dtype=torch.float32)    
+                X = torch.tensor(model_input, dtype=torch.float32)
+                
             # Get predictions
             outputs = self.model(X)
+            # Convert to numpy array with shape (n_samples, 2)
             probabilities = outputs.numpy()
             return probabilities
-    
+            
 class FraudDetectionEnsemble:
     def __init__(self, input_dim, feature_names=None, weights=[0.4, 0.3, 0.3]):
         self.input_dim = input_dim
