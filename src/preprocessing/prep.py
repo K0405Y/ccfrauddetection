@@ -23,7 +23,7 @@ class TransactionPreprocessor:
                 'customer_tx_count', 'customer_terminal_count',
                 'customer_hour_mean', 'customer_hour_std'
             ],
-            'terminal': [
+            'terminals': [
                 'terminal_tx_count', 'terminal_amount_mean', 'terminal_amount_std',
                 'terminal_amount_median', 'terminal_tx_count_large',
                 'terminal_tx_time_mean', 'terminal_tx_time_std',
@@ -308,7 +308,7 @@ class TransactionPreprocessor:
         return df
     
     def transform(self, df, training=True):
-        """Main transformation pipeline with missing value handling"""
+        """Main transformation pipeline with balanced SMOTE sampling"""
         # Clean data
         df = self._clean_data(df)
         
@@ -321,41 +321,52 @@ class TransactionPreprocessor:
         df = self._create_terminal_features(df)
         df = self._create_sequence_features(df)
         
-        # Define feature groups
-        feature_groups = self.feature_groups
-
         # Impute missing values
-        imputed_groups = self._impute_missing_values(df, feature_groups)
+        imputed_groups = self._impute_missing_values(df, self.feature_groups)
         
         # Scale features
         scaled_features = {}
         for group, data in imputed_groups.items():
             if group in ['amount', 'sequence']:
-                scaled_features[group] = self.robust_scaler.fit_transform(data)
+                if training:
+                    scaled_features[group] = self.robust_scaler.fit_transform(data)
+                else:
+                    scaled_features[group] = self.robust_scaler.transform(data)
             else:
-                scaled_features[group] = self.standard_scaler.fit_transform(data)
+                if training:
+                    scaled_features[group] = self.standard_scaler.fit_transform(data)
+                else:
+                    scaled_features[group] = self.standard_scaler.transform(data)
         
         if training:
-            # Apply SMOTE only during training
-            smote = SMOTE(random_state=42)
-            
-            # Combine all scaled features
-            X = np.concatenate([scaled_features[group] for group in feature_groups.keys()], axis=1)
+            # Combine features for SMOTE
+            X = np.concatenate([scaled_features[group] for group in self.feature_groups.keys()], axis=1)
             y = df['TX_FRAUD'].values
             
-            # Verify no NaN values before SMOTE
-            if np.isnan(X).any():
-                print("Warning: NaN values found after preprocessing. Filling with 0...")
-                X = np.nan_to_num(X, 0)
+            # Calculate target number of minority samples (30% of majority)
+            n_minority = (y == 1).sum()
+            n_majority = (y == 0).sum()
+            target_minority = int(n_majority * 0.4)
+            
+            print(f"\nClass distribution before SMOTE:")
+            print(f"Non-fraud: {n_majority}, Fraud: {n_minority}")
+            
+            smote = SMOTE(
+                sampling_strategy={1: target_minority},
+                random_state=42,
+                k_neighbors=min(5, n_minority - 1)
+            )
             
             X_resampled, y_resampled = smote.fit_resample(X, y)
+            
+            print(f"\nClass distribution after SMOTE:")
+            print(f"Non-fraud: {sum(y_resampled == 0)}, Fraud: {sum(y_resampled == 1)}")
             
             # Split back into feature groups
             start_idx = 0
             resampled_groups = {}
-            
-            for group, columns in feature_groups.items():
-                end_idx = start_idx + len(columns)
+            for group in self.feature_groups.keys():
+                end_idx = start_idx + len(self.feature_groups[group])
                 resampled_groups[group] = X_resampled[:, start_idx:end_idx]
                 start_idx = end_idx
             
