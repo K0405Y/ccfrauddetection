@@ -74,14 +74,14 @@ class FraudDetectionEnsemble:
         self.weights = weights
 
         weight_ratio = (1/0.4)
-        self.class_weights = {o: 1, 1: weight_ratio}
+        self.class_weights = {0: 1, 1: weight_ratio}
 
 
         self.xgb_model = xgb.XGBClassifier(
             max_depth=5,
             learning_rate=0.1,
             n_estimators=100,
-            eval_metric='recall',
+            eval_metric='auc',
             use_label_encoder=False,
             objective= 'binary:logistic',
             scale_pos_weight=weight_ratio
@@ -106,8 +106,7 @@ class FraudDetectionEnsemble:
         self.xgb_model.fit(
             X_train, y_train,
             eval_set=[(X_train, y_train), (X_val, y_val)],
-            verbose=False,
-            eval_metric=['recall', 'auc']
+            verbose=False
         )
         
         # Calculate predictions and probabilities
@@ -367,7 +366,9 @@ class FraudDetectionEnsemble:
                 'nn_train_precision': precision_score(y_train, train_preds),
                 'nn_val_precision': precision_score(y_val, val_preds),
                 'nn_train_f1': f1_score(y_train, train_preds),
-                'nn_val_f1': f1_score(y_val, val_preds)
+                'nn_val_f1': f1_score(y_val, val_preds),
+                'nn_train_auc': roc_auc_score(y_train, train_probs),
+                'nn_val_auc': roc_auc_score(y_val, val_probs)
             }
             
             # Training history plot
@@ -391,7 +392,7 @@ class FraudDetectionEnsemble:
             plt.figure(figsize=(8, 6))
             cm = confusion_matrix(y_val, val_preds)
             sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
-            plt.title(f'Neural Network Confusion Matrix\nRecall: {metrics["nn_val_recall"]:.3f}')
+            plt.title(f'Neural Network Confusion Matrix\nRecall: {metrics["nn_val_recall"]:.2f}')
             plt.ylabel('True Label')
             plt.xlabel('Predicted Label')
             mlflow.log_figure(plt.gcf(), "nn_confusion_matrix.png")
@@ -419,7 +420,7 @@ class FraudDetectionEnsemble:
             plt.plot([0, 1], [0, 1], 'k--')
             plt.xlabel('False Positive Rate')
             plt.ylabel('True Positive Rate')
-            plt.title(f'Neural Network ROC Curve (AUC = {metrics["nn_val_auc"]:.3f})')
+            plt.title(f'Neural Network ROC Curve (AUC = {metrics["nn_val_auc"]:.2f})')
             mlflow.log_figure(plt.gcf(), "nn_roc_curve.png")
             plt.close()
                 
@@ -584,6 +585,7 @@ class FraudDetectionEnsemble:
             'Neural Network': pd.Series(nn_importance),
             'Ensemble': pd.Series(ensemble_importance)
         })
+
         mlflow.log_dict(feature_importance_comparison.to_dict(), 'feature_importance_comparison.json')
         
         return all_metrics
@@ -636,9 +638,7 @@ def train_fraud_detection_system(raw_data, test_size=0.25):
     
     for stat, value in data_stats.items():
         print(f"{stat}: {value}")
-    
-    mlflow.log_params(data_stats)
-    
+        
     # Initialize and train ensemble
     print("\nInitializing ensemble model...")
     ensemble = FraudDetectionEnsemble(
@@ -647,13 +647,12 @@ def train_fraud_detection_system(raw_data, test_size=0.25):
         weights=[0.4, 0.3, 0.3]  # Adjustable weights for ensemble
     )
     
-    # Set up MLflow experiment
-    mlflow.set_experiment("Users/kehinde.awomuti@pwc.com/fraud_detection/training")
     
-    with mlflow.start_run(run_name="fraud_detection_ensemble") as run:
+    with mlflow.start_run(run_name="fraud_detection_ensemble", experiment_id=
+                          mlflow.get_experiment_by_name("/Users/kehinde.awomuti@pwc.com/fraud_detection_train").experiment_id) as run:
         # Log dataset info
         mlflow.log_params(data_stats)
-        
+
         # Log feature groups information
         feature_dims = {group: features.shape[1] for group, features in feature_groups_train.items()}
         mlflow.log_dict(feature_dims, 'feature_dimensions.json')
@@ -665,8 +664,7 @@ def train_fraud_detection_system(raw_data, test_size=0.25):
         # Log final metrics summary
         mlflow.log_dict(metrics, 'final_metrics.json')
         
-        # Log preprocessor and models
-        mlflow.sklearn.log_model(preprocessor, "preprocessor")
+        # mlflow.sklearn.log_model(preprocessor, "preprocessor")
         mlflow.sklearn.log_model(ensemble.xgb_model, "xgboost_model")
         mlflow.sklearn.log_model(ensemble.rf_model, "random_forest_model")
         mlflow.pytorch.log_model(ensemble.nn_model, "neural_network_model")
@@ -718,4 +716,7 @@ for filename in os.listdir(directory):
 
 # Concatenate all DataFrames into a single DataFrame
 combined_df = pd.concat(df_list, ignore_index=True)
-preprocessor, ensemble = train_fraud_detection_system(combined_df)
+pos_df = combined_df[combined_df['TX_FRAUD'] == 1].iloc[:30]
+neg_df = combined_df[combined_df['TX_FRAUD'] == 0].iloc[:5000]
+df2 = pd.concat([pos_df, neg_df], ignore_index=True, axis= 0)
+preprocessor, ensemble, metrics = train_fraud_detection_system(df2)
