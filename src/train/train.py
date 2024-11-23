@@ -25,19 +25,22 @@ class FraudDetectionNN(nn.Module):
         super(FraudDetectionNN, self).__init__()
         self.model = nn.Sequential(
             nn.Linear(input_dim, 64),
+            nn.BatchNorm1d(64),
             nn.ReLU(),
             nn.Dropout(0.3),
             nn.Linear(64, 32),
+            nn.BatchNorm1d(32),
             nn.ReLU(),
             nn.Dropout(0.2),
             nn.Linear(32, 16),
+            nn.BatchNorm1d(16),
             nn.ReLU(),
-            nn.Linear(16, 1),
-            nn.Sigmoid()
+            nn.Linear(16, 1)
         )
     
     def forward(self, x):
-        pos_prob = self.model(x)
+        logit = self.model(x)
+        pos_prob = torch.sigmoid(logit)
         neg_prob = 1 - pos_prob
         probs = torch.cat([neg_prob, pos_prob], dim=1)
         return probs
@@ -76,7 +79,6 @@ class FraudDetectionEnsemble:
         
         self.rf_model = RandomForestClassifier(
             n_estimators=100,
-            class_weight='balanced',
             max_depth=10,
             random_state=42,
         )
@@ -130,19 +132,12 @@ class FraudDetectionEnsemble:
         shap.summary_plot(shap_values, X_train, feature_names=self.feature_names, show=False)
         plt.tight_layout()
         mlflow.log_figure(plt.gcf(), "xgb_shap_summary.png")
-        plt.close()
-        
+        plt.close()       
         # Log model signature
         input_example = X_train[:1, :]  
-        # Convert the slice to a dictionary format
-        # input_example = {
-        #     {i+1}: {{j+1}: value for j, value in enumerate(row)}
-        #     for i, row in enumerate(input_example)
-        # # }
         signature = mlflow.models.infer_signature(input_example, self.xgb_model.predict(input_example))
         mlflow.sklearn.log_model(self.xgb_model, "xgboost_model", registered_model_name='xgb_model', signature = signature)
         mlflow.log_metrics(metrics)
-
         return metrics, importance_dict
 
     def _train_random_forest(self, X_train, y_train, X_val, y_val):
@@ -209,8 +204,9 @@ class FraudDetectionEnsemble:
         X_val_tensor = torch.FloatTensor(X_val)
         y_val_tensor = torch.FloatTensor(y_val).reshape(-1, 1)
         
-        criterion = nn.BCELoss()
-        optimizer = torch.optim.Adam(self.nn_model.parameters(), lr=0.001)
+        pos_weight = torch.FloatTensor([(y_train==0).sum() / (y_train==1).sum()])   
+        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        optimizer = torch.optim.Adam(self.nn_model.parameters(), lr=0.001, weight_decay=1e-5)
         
         metrics = {}
         for epoch in range(epochs):
@@ -234,8 +230,8 @@ class FraudDetectionEnsemble:
                 }, step=epoch)
                 
                 if epoch == epochs - 1:
-                    nn_train_probs = outputs[:, 1].numpy()
-                    nn_val_probs = val_outputs[:, 1].numpy()
+                    nn_train_probs = torch.sigmoid(outputs[:, 1]).numpy()
+                    nn_val_probs = torch.sigmoid(val_outputs[:, 1]).numpy()
                     nn_train_pred = (nn_train_probs >= 0.5).astype(int)
                     nn_val_pred = (nn_val_probs >= 0.5).astype(int)
                     
@@ -278,7 +274,7 @@ class FraudDetectionEnsemble:
         # Create an example input
         example_input = X_train[:1]
         signature = mlflow.models.infer_signature( example_input, 
-                                                  np.array([[0.43989954, 0.56010046]]))
+                                                  np.array([[0.44, 0.56]]))
         
         # Log model with custom wrapper
         mlflow.pyfunc.log_model(
@@ -352,9 +348,10 @@ def train_fraud_detection_system(raw_data, test_size=0.2):
     print("Preprocessing data and engineering features...")
     feature_groups, labels = preprocessor.transform(raw_data, training=True)
 
-    #save feature groups for inference purpose
-    with open('/Workspace/Users/kehinde.awomuti@pwc.com/ccfrauddetection/features/feature_groups.pkl', 'wb') as file:
-        pkl.dump(feature_groups, file)
+    feature_names = []
+
+    for group in sorted(preprocessor.feature_groups.keys()):
+        feature_names.extend(preprocessor.feature_groups[group])
 
     # Convert feature groups to numpy array
     X = np.concatenate([feature_groups[group] for group in sorted(feature_groups.keys())], axis=1)
@@ -375,7 +372,7 @@ def train_fraud_detection_system(raw_data, test_size=0.2):
     print(f"Class balance: {np.mean(y):.3f}")
     print(f"\nFeature groups: {sorted(feature_groups.keys())}")
 
-    ensemble = FraudDetectionEnsemble(input_dim=X.shape[1])
+    ensemble = FraudDetectionEnsemble(input_dim=X.shape[1], feature_names=feature_names)
     
     # Set up MLflow tracking
     mlflow.set_experiment("/Users/kehinde.awomuti@pwc.com/fraud_detection_train")
@@ -391,10 +388,9 @@ def train_fraud_detection_system(raw_data, test_size=0.2):
         
         # Train ensemble
         metrics = ensemble.train(X_train, y_train, X_val, y_val)    
-
+        #log metrics
         mlflow.log_dict(metrics, 'all_metrics.json')
-
-        # Log feature dimensions
+        # log feature dimensions
         feature_dims = {group: features.shape[1] for group, features in feature_groups.items()}
         mlflow.log_dict(feature_dims, 'feature_dimensions.json')        
     return preprocessor, ensemble

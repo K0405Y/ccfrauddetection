@@ -80,9 +80,9 @@ class FraudDetectionEnsemble(PythonModel):
         if not customer_found:
             raise ValueError(f"Customer ID {customer_id} not found in transaction history")
 
-        # if not customer_data:
-        #     # Return empty DataFrame with correct columns if no data found
-        #     return pd.DataFrame(columns=required_columns)
+        if not customer_data:
+            # Return empty DataFrame with correct columns if no data found
+            return pd.DataFrame(columns=required_columns)
         
         # Combine all customer data and sort by datetime
         customer_history = pd.concat(customer_data, ignore_index=True)
@@ -288,17 +288,14 @@ class FraudDetectionEnsemble(PythonModel):
                 data = data['inputs']
             if isinstance(data, dict):
                 data = pd.DataFrame([data])
-        
-        # Extract base values
+                
         customer_id = int(data['CUSTOMER_ID'].iloc[0])
         terminal_id = int(data['TERMINAL_ID'].iloc[0])
         amount = float(data['TX_AMOUNT'].iloc[0])
         tx_datetime = pd.to_datetime(data['TX_DATETIME'].iloc[0])
         
-        # Load customer's transaction history
         customer_txns = self._load_customer_transactions(customer_id)
         
-        # Calculate features using the loaded history
         amount_features = self._calculate_customer_amount_features(
             customer_txns, amount, tx_datetime
         )
@@ -311,62 +308,61 @@ class FraudDetectionEnsemble(PythonModel):
             terminal_id, tx_datetime
         )
 
-        # Create features DataFrame
+        # Create features DataFrame with preprocessor's feature names
         features = pd.DataFrame(index=[0])
         
-        # Map all features
-        features['feature_1'] = customer_id / 10000
-        features['feature_2'] = float(data['TX_TIME_SECONDS'].iloc[0]) / 86400
-        features['feature_3'] = float(data['TX_TIME_DAYS'].iloc[0]) / 7
-        features['feature_4'] = terminal_id / 1000
-        features['feature_5'] = amount_features['amount']
-        features['feature_6'] = amount_features['amount_log']
+        # Customer ID and base features
+        features['TX_AMOUNT'] = amount_features['amount']
+        features['amount_log'] = amount_features['amount_log']
+        features['amount_deviation'] = amount_features['amount_deviation']
+        features['mean'] = amount_features['amount_mean']
+        features['std'] = amount_features['amount_std']
+        features['max'] = amount_features['amount_max']
+        features['min'] = amount_features['amount_min']
         
         # Temporal features
-        features['feature_7'] = tx_datetime.hour / 24
-        features['feature_8'] = tx_datetime.dayofweek / 7
-        features['feature_9'] = tx_datetime.month / 12
-        features['feature_10'] = 1 if tx_datetime.dayofweek >= 5 else 0
-        features['feature_11'] = 1 if (tx_datetime.hour >= 23 or tx_datetime.hour <= 4) else 0
-        features['feature_12'] = 1 if (8 <= tx_datetime.hour <= 10 or 
+        features['hour'] = tx_datetime.hour / 24
+        features['day_of_week'] = tx_datetime.dayofweek / 7
+        features['month'] = tx_datetime.month / 12
+        features['is_weekend'] = 1 if tx_datetime.dayofweek >= 5 else 0
+        features['is_night'] = 1 if (tx_datetime.hour >= 23 or tx_datetime.hour <= 4) else 0
+        features['is_rush_hour'] = 1 if (8 <= tx_datetime.hour <= 10 or 
                                      16 <= tx_datetime.hour <= 18) else 0
+        features['is_holiday'] = 0  # You may want to implement holiday checking
         
-        # Amount features
-        features['feature_13'] = amount_features['amount_deviation']
-        features['feature_14'] = amount_features['amount_mean']
-        features['feature_15'] = amount_features['amount_std']
-        features['feature_16'] = amount_features['amount_max']
-        features['feature_17'] = amount_features['amount_min']
-        
-        # Customer behavior features
-        features['feature_18'] = len(customer_txns)
-        features['feature_19'] = customer_txns['TERMINAL_ID'].nunique()
-        features['feature_20'] = customer_txns['TX_DATETIME'].dt.hour.mean()
-        features['feature_21'] = customer_txns['TX_DATETIME'].dt.hour.std()
+        # Customer features
+        features['customer_tx_count'] = len(customer_txns)
+        features['customer_terminal_count'] = customer_txns['TERMINAL_ID'].nunique()
+        features['customer_hour_mean'] = customer_txns['TX_DATETIME'].dt.hour.mean()
+        features['customer_hour_std'] = customer_txns['TX_DATETIME'].dt.hour.std()
         
         # Terminal features
-        features['feature_22'] = terminal_features['terminal_tx_count']
-        features['feature_23'] = terminal_features['terminal_amount_mean']
-        features['feature_24'] = terminal_features['terminal_amount_std']
-        features['feature_25'] = terminal_features['terminal_amount_median']
-        features['feature_26'] = terminal_features['terminal_tx_count_large']
-        features['feature_27'] = terminal_features['terminal_tx_time_mean']
-        features['feature_28'] = terminal_features['terminal_tx_time_std']
-        features['feature_29'] = terminal_features['terminal_fraud_rate_smoothed']
+        features['terminal_tx_count'] = terminal_features['terminal_tx_count']
+        features['terminal_amount_mean'] = terminal_features['terminal_amount_mean']
+        features['terminal_amount_std'] = terminal_features['terminal_amount_std']
+        features['terminal_amount_median'] = terminal_features['terminal_amount_median']
+        features['terminal_tx_count_large'] = terminal_features['terminal_tx_count_large']
+        features['terminal_tx_time_mean'] = terminal_features['terminal_tx_time_mean']
+        features['terminal_tx_time_std'] = terminal_features['terminal_tx_time_std']
+        features['terminal_fraud_rate_smoothed'] = terminal_features['terminal_fraud_rate_smoothed']
         
         # Sequence features
-        features['feature_30'] = sequence_features['time_since_last']
-        features['feature_31'] = sequence_features['time_until_next']
-        features['feature_32'] = sequence_features['amount_diff_last']
-        features['feature_33'] = sequence_features['amount_diff_next']
-        features['feature_34'] = sequence_features['terminal_changed']
-        features['feature_35'] = sequence_features['tx_velocity_1h']
-        features['feature_36'] = sequence_features['tx_velocity_24h']
-        features['feature_37'] = sequence_features['repeated_terminal']
+        features['time_since_last'] = sequence_features['time_since_last']
+        features['time_until_next'] = sequence_features['time_until_next']
+        features['amount_diff_last'] = sequence_features['amount_diff_last']
+        features['amount_diff_next'] = sequence_features['amount_diff_next']
+        features['terminal_changed'] = sequence_features['terminal_changed']
+        features['tx_velocity_1h'] = sequence_features['tx_velocity_1h']
+        features['tx_velocity_24h'] = sequence_features['tx_velocity_24h']
+        features['amount_velocity_1h'] = sequence_features['amount_velocity_1h']
+        features['amount_velocity_24h'] = sequence_features['amount_velocity_24h']
+        features['unique_terminals_24h'] = sequence_features['unique_terminals_24h']
+        features['repeated_terminal'] = sequence_features['repeated_terminal']
         
         return features
 
-    def _load_model(self, workspace, model_name, version):
+
+    def _load_model(self, model_name, version):
         return mlflow.pyfunc.load_model(
             model_uri=f"models:/{model_name}/{version}"
         )
@@ -377,66 +373,62 @@ class FraudDetectionEnsemble(PythonModel):
             mlflow.set_tracking_uri("databricks")
         else:
             mlflow.set_tracking_uri("local")
-            
-        self.xgb_model = self._load_model(context, 'xgb_model', self.model_versions['xgb_model'])
-        self.rf_model = self._load_model(context, 'rf_model', self.model_versions['rf_model'])
-        self.nn_model = self._load_model(context, 'pytorch_model', self.model_versions['pytorch_model'])
+                
+        self.xgb_model = mlflow.sklearn.load_model(f"models:/xgb_model/{self.model_versions['xgb_model']}")
+        self.rf_model = mlflow.sklearn.load_model(f"models:/rf_model/{self.model_versions['rf_model']}")
+        self.nn_model = self._load_model('pytorch_model', self.model_versions['pytorch_model'])
         
-        self.feature_names = [f'feature_{i}' for i in range(1, 38)]
+        # Get feature names from preprocessor's feature groups 
+        preprocessor = TransactionPreprocessor()
+        self.feature_names = []
+        for group in sorted(preprocessor.feature_groups.keys()):
+            self.feature_names.extend(preprocessor.feature_groups[group])
 
     def predict(self, context, input_data):
         """Make predictions using the ensemble"""
         try:
-            # Preprocess input data
             X = self._preprocess_input(input_data)
             
-            # Get individual model predictions
-            xgb_prob = self.xgb_model.predict(X)
-            rf_prob = self.rf_model.predict(X)
+            xgb_probs = self.xgb_model.predict_proba(X)
+            rf_probs = self.rf_model.predict_proba(X)
+            nn_probs = self.nn_model.predict(X)
+            
+            results = []
+            for i in range(len(X)):
+                # Get individual model probabilities for both classes
+                xgb_prob_pair = xgb_probs[i]
+                rf_prob_pair = rf_probs[i]
+                nn_prob_pair = nn_probs[i]
+                
+                # Calculate weighted ensemble probabilities
+                ensemble_probs = np.zeros(2)
+                for j in range(2):
+                    ensemble_probs[j] = (
+                        self.weights[0] * xgb_prob_pair[j] +
+                        self.weights[1] * rf_prob_pair[j] +
+                        self.weights[2] * nn_prob_pair[j]
+                    )
 
-            X_tensor = torch.tensor(X.values, dtype=torch.float32)
-            nn_prob = self.nn_model.predict(pd.DataFrame(X_tensor.numpy()))
-            
-            # Convert predictions to probabilities if needed
-            if hasattr(xgb_prob, 'iloc'):
-                xgb_prob = float(xgb_prob.iloc[0])
-            elif isinstance(xgb_prob, np.ndarray):
-                xgb_prob = float(xgb_prob[0])
-            
-            if hasattr(rf_prob, 'iloc'):
-                rf_prob = float(rf_prob.iloc[0])
-            elif isinstance(rf_prob, np.ndarray):
-                rf_prob = float(rf_prob[0])
-            
-            if hasattr(nn_prob, 'iloc'):
-                nn_prob = float(nn_prob.iloc[0])
-            elif isinstance(nn_prob, np.ndarray):
-                nn_prob = float(nn_prob[0])
-            
-            # Calculate ensemble probability
-            ensemble_prob = (
-                self.weights[0] * xgb_prob +
-                self.weights[1] * rf_prob +
-                self.weights[2] * nn_prob
-            )
-            
-            # Make prediction
-            prediction = "TRANSACTION IS FRAUDULENT" if ensemble_prob >= 0.5 else "TRANSACTION IS NOT FRAUDULENT"
-            
-            return [{
-                'prediction': prediction,
-                'probability': ensemble_prob,
-                'model_predictions': {
-                    'xgboost': xgb_prob,
-                    'random_forest': rf_prob,
-                    'neural_network': nn_prob
+                ensemble_probs = ensemble_probs / ensemble_probs.sum()
+                
+            # Format probability outputs
+            result = {
+                'Models': {
+                        'xgboost_fraud_probability': f"{xgb_prob_pair[1]:.2f}"
+                        ,
+                        'random_forest_fraud_probability': f"{rf_prob_pair[1]:.2f}"
+                        ,
+                        'pytorch_fraud_prediction': f"{nn_prob_pair[1]:.2f}"
+                    },
+                'Final Prediction': {
+                    'Label': "TRANSACTION IS FRAUDULENT" if ensemble_probs[1] >= 0.5 else "TRANSACTION IS NOT FRAUDULENT",
+                    'Final_Fraud_Probability': f"{ensemble_probs[1]:.2f}"
                 }
-            }]
+            }
+            results.append(result)
             
-        except ValueError as e:
-            if "Customer ID" in str(e):
-                return[{"error": "Invalid customer ID"}]
-            raise
+            return results
+                
         except Exception as e:
             raise RuntimeError(f"Prediction error: {str(e)}")
 
@@ -445,11 +437,11 @@ class FraudDetectionEnsemble(PythonModel):
 example_input = {
     "TRANSACTION_ID": 4781,
     "TX_DATETIME": "2024-10-29 05:57:40",
-    "CUSTOMER_ID": 568,
+    "CUSTOMER_ID": 596,
     "TERMINAL_ID": 139,
     "TX_AMOUNT": 251.25,
     "TX_TIME_SECONDS": 21460,
-    "TX_TIME_DAYS": 0
+    "TX_TIME_DAYS": 29
 }
 
 # Model versions
@@ -459,7 +451,7 @@ model_versions = {
     'pytorch_model': '1'
 }
 
-# Initialize and register the model
+# Initialize and register the final model
 model = FraudDetectionEnsemble(model_versions = model_versions, data_directory='/Workspace/Users/kehinde.awomuti@pwc.com/ccfrauddetection/data')
 
 experiment_id = mlflow.set_experiment('/Users/kehinde.awomuti@pwc.com/fraud_detection_inference')

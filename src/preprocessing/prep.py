@@ -18,6 +18,33 @@ class TransactionPreprocessor:
         self.us_holidays = holidays.US()
         self.numerical_imputer = SimpleImputer(strategy='median')
         self.categorical_imputer = SimpleImputer(strategy='constant', fill_value='missing')
+        self.feature_groups = {
+            'customer': [
+                'customer_tx_count', 'customer_terminal_count',
+                'customer_hour_mean', 'customer_hour_std'
+            ],
+            'terminal': [
+                'terminal_tx_count', 'terminal_amount_mean', 'terminal_amount_std',
+                'terminal_amount_median', 'terminal_tx_count_large',
+                'terminal_tx_time_mean', 'terminal_tx_time_std',
+                'terminal_fraud_rate_smoothed'
+            ],
+            'amount': [
+                'TX_AMOUNT', 'amount_log', 'amount_deviation',
+                'mean', 'std', 'max', 'min'
+            ],
+            'temporal': [
+                'hour', 'day_of_week', 'month', 'is_weekend',
+                'is_night', 'is_rush_hour', 'is_holiday'
+            ],
+            'sequence': [
+                'time_since_last', 'time_until_next', 
+                'amount_diff_last', 'amount_diff_next',
+                'terminal_changed', 'tx_velocity_1h', 'tx_velocity_24h',
+                'amount_velocity_1h', 'amount_velocity_24h',
+                'repeated_terminal', 'unique_terminals_24h'
+            ]
+        }
         
     def _clean_data(self, df):
         """Clean and handle missing values in the dataset"""
@@ -295,33 +322,7 @@ class TransactionPreprocessor:
         df = self._create_sequence_features(df)
         
         # Define feature groups
-        feature_groups = {
-            'customer': [
-                'customer_tx_count', 'customer_terminal_count',
-                'customer_hour_mean', 'customer_hour_std'
-            ],
-            'terminal': [
-                'terminal_tx_count', 'terminal_amount_mean', 'terminal_amount_std',
-                'terminal_amount_median', 'terminal_tx_count_large',
-                'terminal_tx_time_mean', 'terminal_tx_time_std',
-                'terminal_fraud_rate_smoothed'
-            ],
-            'amount': [
-                'TX_AMOUNT', 'amount_log', 'amount_deviation',
-                'mean', 'std', 'max', 'min'
-            ],
-            'temporal': [
-                'hour', 'day_of_week', 'month', 'is_weekend',
-                'is_night', 'is_rush_hour', 'is_holiday'
-            ],
-            'sequence': [
-                'time_since_last', 'time_until_next', 
-                'amount_diff_last', 'amount_diff_next',
-                'terminal_changed', 'tx_velocity_1h', 'tx_velocity_24h',
-                'amount_velocity_1h', 'amount_velocity_24h',
-                'repeated_terminal', 'unique_terminals_24h'
-            ]
-        }
+        feature_groups = self.feature_groups
 
         # Impute missing values
         imputed_groups = self._impute_missing_values(df, feature_groups)
