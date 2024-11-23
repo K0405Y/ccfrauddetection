@@ -230,7 +230,7 @@ class TransactionPreprocessor:
             # Apply SMOTE
             n_minority = (y == 1).sum()
             n_majority = (y == 0).sum()
-            target_minority = int(n_majority * 0.5)
+            target_minority = int(n_majority * 0.8)
             
             print(f"\nTraining Data Class distribution before SMOTE:")
             print(f"Non-fraud: {n_majority}, Fraud: {n_minority}")

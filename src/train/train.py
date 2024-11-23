@@ -664,11 +664,38 @@ def train_fraud_detection_system(raw_data, test_size=0.25):
         # Log final metrics summary
         mlflow.log_dict(metrics, 'final_metrics.json')
         
-        # mlflow.sklearn.log_model(preprocessor, "preprocessor")
-        mlflow.sklearn.log_model(ensemble.xgb_model, "xgboost_model")
-        mlflow.sklearn.log_model(ensemble.rf_model, "random_forest_model")
-        mlflow.pytorch.log_model(ensemble.nn_model, "neural_network_model")
-        
+        input_example = pd.DataFrame(X_train[:1], columns=feature_names)
+
+        signature = mlflow.models.signature.infer_signature(X_train, ensemble.xgb_model.predict_proba(X_train))
+
+        # Log XGBoost model with signature and register
+        mlflow.sklearn.log_model(
+            ensemble.xgb_model, 
+            "xgboost_model",
+            signature=signature,
+            input_example=input_example,
+            registered_model_name="fd_xgboost"
+        )
+
+        # Log Random Forest model with signature and register
+        mlflow.sklearn.log_model(
+            ensemble.rf_model, 
+            "random_forest_model",
+            signature=signature,
+            input_example=input_example,
+            registered_model_name="fd_random_forest"
+        )
+
+        # Log Neural Network model with custom wrapper, signature and register
+        wrapped_nn = FraudDetectionNNWrapper(ensemble.nn_model)
+        nn_signature = mlflow.models.signature.infer_signature(X_train, wrapped_nn.predict(None, pd.DataFrame(X_train, columns=feature_names)))
+        mlflow.pyfunc.log_model(
+            "neural_network_model",
+            python_model=wrapped_nn,
+            signature=nn_signature,
+            input_example=input_example,
+            registered_model_name="fd_torch")     
+
         # Create and log a summary report
         summary_report = f"""
         Fraud Detection Training Summary
@@ -719,4 +746,4 @@ combined_df = pd.concat(df_list, ignore_index=True)
 pos_df = combined_df[combined_df['TX_FRAUD'] == 1].iloc[:30]
 neg_df = combined_df[combined_df['TX_FRAUD'] == 0].iloc[:5000]
 df2 = pd.concat([pos_df, neg_df], ignore_index=True, axis= 0)
-preprocessor, ensemble, metrics = train_fraud_detection_system(df2)
+preprocessor, ensemble, metrics = train_fraud_detection_system(combined_df)
