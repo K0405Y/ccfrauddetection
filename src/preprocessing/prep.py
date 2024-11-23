@@ -46,6 +46,20 @@ class TransactionPreprocessor:
             ]
         }
         
+
+        self.scalers = {
+            'temporal': StandardScaler(),
+            'amount': RobustScaler(),
+            'customer': StandardScaler(),
+            'terminals': StandardScaler(),
+            'sequence': RobustScaler()
+        }
+        
+        # Initialize feature states
+        self.fitted = False
+        self.feature_names_ = []
+
+
     def _clean_data(self, df):
         """Clean and handle missing values in the dataset"""
         df = df.copy()
@@ -59,13 +73,9 @@ class TransactionPreprocessor:
         numeric_columns = df.select_dtypes(include=[np.number]).columns
         df[numeric_columns] = df[numeric_columns].replace([np.inf, -np.inf], np.nan)
         
-        # Log missing values
-        missing_values = df.isnull().sum()
-        print("Missing values before imputation:")
-        print(missing_values[missing_values > 0])
-        
         return df
-    
+
+
     def _impute_missing_values(self, df, feature_groups):
         """Impute missing values for each feature group"""
         imputed_groups = {}
@@ -307,49 +317,70 @@ class TransactionPreprocessor:
 
         return df
     
-    def transform(self, df, training=True):
-        """Main transformation pipeline with balanced SMOTE sampling"""
-        # Clean data
-        df = self._clean_data(df)
+    def _create_all_features(self, df):
+        """Create all features in a consistent order"""
+        df = df.copy()
         
-        # Extract datetime features
+        # Clean and prepare datetime
+        df = self._clean_data(df)
         df = self._extract_datetime_features(df)
         
-        # Create feature groups
+        # Create all feature groups
         df = self._create_amount_features(df)
         df = self._create_customer_features(df)
         df = self._create_terminal_features(df)
         df = self._create_sequence_features(df)
         
-        # Impute missing values
-        imputed_groups = self._impute_missing_values(df, self.feature_groups)
+        # Ensure all expected features exist
+        all_expected_features = []
+        for group_features in self.feature_groups.values():
+            all_expected_features.extend(group_features)
+            
+        missing_features = set(all_expected_features) - set(df.columns)
+        if missing_features:
+            for feature in missing_features:
+                df[feature] = 0  # Add missing features with default values
+                
+        return df
+
+    def transform(self, df, training=True):
+        """Main transformation pipeline with consistent feature handling"""
+        # Create all features
+        transformed_df = self._create_all_features(df)
         
-        # Scale features
+        # Initialize container for scaled features
         scaled_features = {}
-        for group, data in imputed_groups.items():
-            if group in ['amount', 'sequence']:
-                if training:
-                    scaled_features[group] = self.robust_scaler.fit_transform(data)
-                else:
-                    scaled_features[group] = self.robust_scaler.transform(data)
+        
+        # Process each feature group
+        for group, features in self.feature_groups.items():
+            # Extract features for this group
+            group_data = transformed_df[features]
+            
+            # Handle missing values
+            group_data = pd.DataFrame(
+                self.numerical_imputer.fit_transform(group_data),
+                columns=features,
+                index=df.index
+            )
+            
+            # Scale features
+            if training:
+                scaled_features[group] = self.scalers[group].fit_transform(group_data)
+                if not self.fitted:
+                    self.feature_names_.extend(features)
             else:
-                if training:
-                    scaled_features[group] = self.standard_scaler.fit_transform(data)
-                else:
-                    scaled_features[group] = self.standard_scaler.transform(data)
+                scaled_features[group] = self.scalers[group].transform(group_data)
         
         if training:
+            self.fitted = True
             # Combine features for SMOTE
             X = np.concatenate([scaled_features[group] for group in self.feature_groups.keys()], axis=1)
             y = df['TX_FRAUD'].values
             
-            # Calculate target number of minority samples (30% of majority)
+            # Apply SMOTE
             n_minority = (y == 1).sum()
             n_majority = (y == 0).sum()
             target_minority = int(n_majority * 0.4)
-            
-            print(f"\nClass distribution before SMOTE:")
-            print(f"Non-fraud: {n_majority}, Fraud: {n_minority}")
             
             smote = SMOTE(
                 sampling_strategy={1: target_minority},
@@ -358,9 +389,6 @@ class TransactionPreprocessor:
             )
             
             X_resampled, y_resampled = smote.fit_resample(X, y)
-            
-            print(f"\nClass distribution after SMOTE:")
-            print(f"Non-fraud: {sum(y_resampled == 0)}, Fraud: {sum(y_resampled == 1)}")
             
             # Split back into feature groups
             start_idx = 0
@@ -371,5 +399,5 @@ class TransactionPreprocessor:
                 start_idx = end_idx
             
             return resampled_groups, y_resampled
-        
+            
         return scaled_features
