@@ -78,400 +78,151 @@ class FraudDetectionEnsemble:
         self.class_weights = {0: 1, 1: weight_ratio}
 
         self.xgb_model = xgb.XGBClassifier(
-            max_depth=4,
-            learning_rate=0.1,
-            n_estimators=200,
+            max_depth=6,
+            learning_rate=0.05,
+            n_estimators=300,
             min_child_weight = 5,
-            subsample = 0.8,
-            colsample_bytree = 0.8,
-            gamma = 1,
-            reg_alpha = 0.1,
-            reg_lambda = 0.1,
+            subsample = 0.7,
+            colsample_bytree = 0.7,
+            gamma = 0.5,
+            reg_alpha = 0.5,
+            reg_lambda = 1,
             eval_metric='auc',
             use_label_encoder=False,
             objective= 'binary:logistic',
-            scale_pos_weight=weight_ratio
+            scale_pos_weight=weight_ratio * 1.2
         )
         
         self.rf_model = RandomForestClassifier(
             n_estimators=200,
             max_depth=8,
-            min_samples_leaf=4,
-            min_samples_split=10,
-            max_features='sqrt',
+            min_samples_leaf=2,
+            min_samples_split=5,
             random_state=42,
-            class_weight=self.class_weights,
-            criterion='entropy',
-            n_jobs= 1
+            class_weight= 'balanced_subsample',
+            bootstrap = True,
+            oob_score = True
         )
         
         self.nn_model = FraudDetectionNN(input_dim)
     
-    def _optimize_threshold(self, y_true, y_prob):
-        """Optimize threshold using F1 score"""
-        thresholds = np.linspace(0.1, 0.9, 100)
-        best_threshold = 0.5
-        best_f1 = 0
+    def _optimize_threshold(self, y_true, y_prob, metric='f1', threshold_range=None):
+        """
+        Optimize classification threshold based on specified metric.
         
-        for threshold in thresholds:
+        Args:
+            y_true: True labels
+            y_prob: Predicted probabilities
+            metric: Metric to optimize ('f1', 'precision', 'recall', 'balanced')
+            threshold_range: Optional range of thresholds to try
+        
+        Returns:
+            best_threshold: Optimal threshold value
+            best_score: Best score achieved
+        """
+        if threshold_range is None:
+            threshold_range = np.linspace(0.1, 0.9, 100)
+        
+        best_threshold = 0.5
+        best_score = 0
+        
+        for threshold in threshold_range:
             y_pred = (y_prob >= threshold).astype(int)
-            f1 = f1_score(y_true, y_pred)
-            if f1 > best_f1:
-                best_f1 = f1
+            
+            if metric == 'f1':
+                score = f1_score(y_true, y_pred)
+            elif metric == 'precision':
+                score = precision_score(y_true, y_pred)
+            elif metric == 'recall':
+                score = recall_score(y_true, y_pred)
+            elif metric == 'balanced':
+                # Balanced metric combining precision and recall
+                prec = precision_score(y_true, y_pred)
+                rec = recall_score(y_true, y_pred)
+                score = 2 * (prec *  rec) / (prec + rec) if (prec + rec) > 0 else 0
+            else:
+                raise ValueError(f"Unsupported metric: {metric}")
+            
+            if score > best_score:
+                best_score = score
                 best_threshold = threshold
         
-        return best_threshold
-  
+        return best_threshold, best_score
 
-    def _train_xgboost(self, X_train, y_train, X_val, y_val):
-        """Train XGBoost model with comprehensive metrics and feature importance"""
-        print("\nTraining XGBoost model...")
+    def _optimize_model_thresholds(self, X_val, y_val, metric='f1'):
+        """Optimize thresholds for individual models and ensemble"""
+        print("\nOptimizing classification thresholds...")
         
-        # Configure model
-        self.xgb_model.fit(
-            X_train, y_train,
-            eval_set=[(X_train, y_train), (X_val, y_val)],
-            verbose=False
+        # Get predictions from each model
+        xgb_probs = self.xgb_model.predict_proba(X_val)[:, 1]
+        rf_probs = self.rf_model.predict_proba(X_val)[:, 1]
+        nn_probs = self.nn_model(torch.FloatTensor(X_val)).detach().numpy()[:, 1]
+        
+        # Optimize thresholds for individual models
+        self.thresholds['xgboost'], xgb_score = self._optimize_threshold(y_val, xgb_probs, metric)
+        self.thresholds['random_forest'], rf_score = self._optimize_threshold(y_val, rf_probs, metric)
+        self.thresholds['neural_network'], nn_score = self._optimize_threshold(y_val, nn_probs, metric)
+        
+        # Get ensemble predictions with current weights
+        ensemble_probs = (
+            self.weights[0] * xgb_probs +
+            self.weights[1] * rf_probs +
+            self.weights[2] * nn_probs
         )
         
-        # Calculate predictions and probabilities
-        xgb_train_probs = self.xgb_model.predict_proba(X_train)[:, 1]
-        xgb_val_probs = self.xgb_model.predict_proba(X_val)[:, 1]
-        # Use threshold optimization for better recall
-        thresholds = np.linspace(0, 1, 100)
-        best_threshold = 0.5
-        best_recall = 0
+        # Optimize ensemble threshold
+        self.thresholds['ensemble'], ensemble_score = self._optimize_threshold(y_val, ensemble_probs, metric)
         
-        for threshold in thresholds:
-            val_preds = (xgb_val_probs >= threshold).astype(int)
-            current_recall = recall_score(y_val, val_preds)
-            if current_recall > best_recall:
-                best_recall = current_recall
-                best_threshold = threshold
+        print(f"\nOptimized Thresholds ({metric}):")
+        print(f"XGBoost: {self.thresholds['xgboost']:.3f} (score: {xgb_score:.3f})")
+        print(f"Random Forest: {self.thresholds['random_forest']:.3f} (score: {rf_score:.3f})")
+        print(f"Neural Network: {self.thresholds['neural_network']:.3f} (score: {nn_score:.3f})")
+        print(f"Ensemble: {self.thresholds['ensemble']:.3f} (score: {ensemble_score:.3f})")
         
-        # Use optimized threshold for final predictions
-        xgb_train_pred = (xgb_train_probs >= best_threshold).astype(int)
-        xgb_val_pred = (xgb_val_probs >= best_threshold).astype(int)
-        
-        metrics = {
-            'xgb_threshold': best_threshold,
-            'xgb_train_recall': recall_score(y_train, xgb_train_pred),
-            'xgb_val_recall': recall_score(y_val, xgb_val_pred),
-            'xgb_train_precision': precision_score(y_train, xgb_train_pred),
-            'xgb_val_precision': precision_score(y_val, xgb_val_pred),
-            'xgb_train_f1': f1_score(y_train, xgb_train_pred),
-            'xgb_val_f1': f1_score(y_val, xgb_val_pred),
-            'xgb_train_auc': roc_auc_score(y_train, xgb_train_probs),
-            'xgb_val_auc': roc_auc_score(y_val, xgb_val_probs)
-        }
+        return self.thresholds
 
-
-        # Feature importance analysis
-        importance_dict = dict(zip(
-            self.feature_names,
-            self.xgb_model.feature_importances_
-        ))
+    def predict_proba(self, X):
+        """Get probability predictions using optimized weights"""
+        X_tensor = torch.FloatTensor(X)
         
-        # Log top 20 important features
-        sorted_importance = sorted(importance_dict.items(), key=lambda x: x[1], reverse=True)[:20]
-        xgb_importance_dict = {f'xgb_importance_{k}': v for k, v in sorted_importance}
-        metrics.update(xgb_importance_dict)
+        # Get predictions from each model
+        xgb_probs = self.xgb_model.predict_proba(X)[:, 1]
+        rf_probs = self.rf_model.predict_proba(X)[:, 1]
+        nn_probs = self.nn_model(X_tensor).detach().numpy()[:, 1]
         
-        # SHAP analysis
-        explainer = shap.TreeExplainer(self.xgb_model)
-        shap_values = explainer.shap_values(X_train)
-        
-        # Log SHAP plots
-        plt.figure(figsize=(12, 8))
-        shap.summary_plot(shap_values, X_train, feature_names=self.feature_names, show=False)
-        plt.tight_layout()
-        mlflow.log_figure(plt.gcf(), "xgb_shap_summary.png")
-        plt.close()
-        
-        # Log confusion matrix
-        plt.figure(figsize=(8, 6))
-        cm = confusion_matrix(y_val, xgb_val_pred)
-        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
-        plt.title('XGBoost Confusion Matrix (Validation)')
-        plt.ylabel('True Label')
-        plt.xlabel('Predicted Label')
-        mlflow.log_figure(plt.gcf(), "xgb_confusion_matrix.png")
-        plt.close()
-        
-        # Log ROC curve
-        plt.figure(figsize=(8, 6))
-        fpr, tpr, _ = roc_curve(y_val, xgb_val_probs)
-        plt.plot(fpr, tpr)
-        plt.plot([0, 1], [0, 1], 'k--')
-        plt.xlabel('False Positive Rate')
-        plt.ylabel('True Positive Rate')
-        plt.title(f'XGBoost ROC Curve (AUC = {metrics["xgb_val_auc"]:.3f})')
-        mlflow.log_figure(plt.gcf(), "xgb_roc_curve.png")
-        plt.close()
-        
-        return metrics, importance_dict
-
-    def _train_random_forest(self, X_train, y_train, X_val, y_val):
-        """Train Random Forest model with comprehensive metrics and feature importance"""
-        print("\nTraining Random Forest model...")
-        
-        self.rf_model.fit(X_train, y_train)
-        
-        # Calculate predictions and probabilities
-        rf_train_probs = self.rf_model.predict_proba(X_train)[:, 1]
-        rf_val_probs = self.rf_model.predict_proba(X_val)[:, 1]
-         # Threshold optimization for recall
-        thresholds = np.linspace(0, 1, 100)
-        best_threshold = 0.5
-        best_recall = 0
-        
-        for threshold in thresholds:
-            val_preds = (rf_val_probs >= threshold).astype(int)
-            current_recall = recall_score(y_val, val_preds)
-            if current_recall > best_recall:
-                best_recall = current_recall
-                best_threshold = threshold
-        
-        # Use optimized threshold
-        rf_train_pred = (rf_train_probs >= best_threshold).astype(int)
-        rf_val_pred = (rf_val_probs >= best_threshold).astype(int)
-        
-        metrics = {
-            'rf_threshold': best_threshold,
-            'rf_train_recall': recall_score(y_train, rf_train_pred),
-            'rf_val_recall': recall_score(y_val, rf_val_pred),
-            'rf_train_precision': precision_score(y_train, rf_train_pred),
-            'rf_val_precision': precision_score(y_val, rf_val_pred),
-            'rf_train_f1': f1_score(y_train, rf_train_pred),
-            'rf_val_f1': f1_score(y_val, rf_val_pred),
-            'rf_train_auc': roc_auc_score(y_train, rf_train_probs),
-            'rf_val_auc': roc_auc_score(y_val, rf_val_probs)
-        }
-
-
-        # Feature importance analysis
-        importance_dict = dict(zip(
-            self.feature_names,
-            self.rf_model.feature_importances_
-        ))
-        
-        # Log top 20 important features
-        sorted_importance = sorted(importance_dict.items(), key=lambda x: x[1], reverse=True)[:20]
-        rf_importance_dict = {f'rf_importance_{k}': v for k, v in sorted_importance}
-        metrics.update(rf_importance_dict)
-        
-        # Permutation importance
-        perm_importance = permutation_importance(
-            self.rf_model, X_val, y_val,
-            n_repeats=10,
-            random_state=42
+        # Calculate weighted probabilities
+        weighted_probs = (
+            self.weights[0] * xgb_probs +
+            self.weights[1] * rf_probs +
+            self.weights[2] * nn_probs
         )
         
-        # Log permutation importance plot
-        plt.figure(figsize=(12, 6))
-        sorted_idx = perm_importance.importances_mean.argsort()
-        plt.boxplot(perm_importance.importances[sorted_idx].T,
-                labels=np.array(self.feature_names)[sorted_idx])
-        plt.xticks(rotation=90)
-        plt.title('Random Forest Permutation Importance')
-        plt.tight_layout()
-        mlflow.log_figure(plt.gcf(), "rf_permutation_importance.png")
-        plt.close()
-        
-        # Log confusion matrix
-        plt.figure(figsize=(8, 6))
-        cm = confusion_matrix(y_val, rf_val_pred)
-        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
-        plt.title('Random Forest Confusion Matrix (Validation)')
-        plt.ylabel('True Label')
-        plt.xlabel('Predicted Label')
-        mlflow.log_figure(plt.gcf(), "rf_confusion_matrix.png")
-        plt.close()
-        
-        # Log ROC curve
-        plt.figure(figsize=(8, 6))
-        fpr, tpr, _ = roc_curve(y_val, rf_val_probs)
-        plt.plot(fpr, tpr)
-        plt.plot([0, 1], [0, 1], 'k--')
-        plt.xlabel('False Positive Rate')
-        plt.ylabel('True Positive Rate')
-        plt.title(f'Random Forest ROC Curve (AUC = {metrics["rf_val_auc"]:.3f})')
-        mlflow.log_figure(plt.gcf(), "rf_roc_curve.png")
-        plt.close()
-        
-        return metrics, importance_dict
+        return np.vstack((1 - weighted_probs, weighted_probs)).T
 
-    def _train_neural_network(self, X_train, y_train, X_val, y_val, epochs=20):
-        """Train Neural Network with comprehensive metrics and feature importance"""
-        print("\nTraining Neural Network model...")
-        
-        X_train_tensor = torch.FloatTensor(X_train)
-        y_train_tensor = torch.LongTensor(y_train)
-        X_val_tensor = torch.FloatTensor(X_val)
-        y_val_tensor = torch.LongTensor(y_val)
-        
-        # Use class weights
-        weight_ratio = self.class_weights[1]
-        class_weights = torch.FloatTensor([1.0, weight_ratio])
-
-        criterion = nn.CrossEntropyLoss(weight=class_weights)
-        optimizer = torch.optim.Adam(
-            self.nn_model.parameters(),
-            lr=0.001,
-            weight_decay=0.01
-        )
-
-        patience = 10
-        best_val_loss = float('inf')
-        patience_counter = 0
-
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 
-                                                               patience=patience, 
-                                                               verbose=True, 
-                                                               mode='min', 
-                                                               factor=0.5)
-        
-    # Initialize tracking
-        best_recall = 0
-        best_threshold = 0.5
-        best_model_state = None
-        history = {
-            'train_loss': [], 'val_loss': [],
-            'val_recall': [], 'val_precision': []
-        }
-        
-        for epoch in range(epochs):
-            # Training
-            self.nn_model.train()
-            optimizer.zero_grad()
-            outputs = self.nn_model(X_train_tensor)
-            loss = criterion(outputs, y_train_tensor)
-            loss.backward()
-            optimizer.step()
+    def predict(self, X, threshold=None):
+        """Get class predictions using optimized weights and thresholds"""
+        if threshold is None:
+            threshold = self.thresholds['ensemble']
             
-            # Validation
-            self.nn_model.eval()
-            with torch.no_grad():
-                val_outputs = self.nn_model(X_val_tensor)
-                val_loss = criterion(val_outputs, y_val_tensor)
-                val_probs = val_outputs[:, 1].numpy()
-                
-                # Find best threshold for recall
-                for threshold in np.linspace(0, 1, 100):
-                    val_preds = (val_probs >= threshold).astype(int)
-                    current_recall = recall_score(y_val, val_preds)
-                    if current_recall > best_recall:
-                        best_recall = current_recall
-                        best_threshold = threshold
-                        best_model_state = self.nn_model.state_dict().copy()
-                
-                # Track metrics
-                val_preds = (val_probs >= best_threshold).astype(int)
-                history['train_loss'].append(loss.item())
-                history['val_loss'].append(val_loss.item())
-                history['val_recall'].append(recall_score(y_val, val_preds))
-                history['val_precision'].append(precision_score(y_val, val_preds))
-                
-                # Log to MLflow
-                mlflow.log_metrics({
-                    'nn_train_loss': loss.item(),
-                    'nn_val_loss': val_loss.item(),
-                    'nn_val_recall': history['val_recall'][-1],
-                    'nn_val_precision': history['val_precision'][-1]
-                }, step=epoch)
-                
-                # Learning rate scheduling
-                scheduler.step(val_loss)
-                
-                # Early stopping
-                if val_loss < best_val_loss:
-                    best_val_loss = val_loss
-                    best_model_state = self.nn_model.state_dict().copy()
-                    patience_counter = 0
-                else:
-                    patience_counter += 1
-                    
-                if patience_counter >= patience:
-                    print(f"Early stopping triggered at epoch {epoch}")
-                    break
-        
-        # Restore best model
-        if best_model_state:
-            self.nn_model.load_state_dict(best_model_state)
-        
-        # Final evaluation
-        self.nn_model.eval()
-        with torch.no_grad():
-            train_outputs = self.nn_model(X_train_tensor)
-            val_outputs = self.nn_model(X_val_tensor)
-            train_probs = train_outputs[:, 1].numpy()
-            val_probs = val_outputs[:, 1].numpy()
-            train_preds = (train_probs >= best_threshold).astype(int)
-            val_preds = (val_probs >= best_threshold).astype(int)
-            
-            metrics = {
-                'nn_threshold': best_threshold,
-                'nn_train_recall': recall_score(y_train, train_preds),
-                'nn_val_recall': recall_score(y_val, val_preds),
-                'nn_train_precision': precision_score(y_train, train_preds),
-                'nn_val_precision': precision_score(y_val, val_preds),
-                'nn_train_f1': f1_score(y_train, train_preds),
-                'nn_val_f1': f1_score(y_val, val_preds),
-                'nn_train_auc': roc_auc_score(y_train, train_probs),
-                'nn_val_auc': roc_auc_score(y_val, val_probs)
-            }
-            
-            # Training history plot
-            plt.figure(figsize=(12, 4))
-            plt.subplot(1, 2, 1)
-            plt.plot(history['train_loss'], label='Train Loss')
-            plt.plot(history['val_loss'], label='Val Loss')
-            plt.title('Loss History')
-            plt.legend()
-            
-            plt.subplot(1, 2, 2)
-            plt.plot(history['val_recall'], label='Recall')
-            plt.plot(history['val_precision'], label='Precision')
-            plt.title('Validation Metrics')
-            plt.legend()
-            plt.tight_layout()
-            mlflow.log_figure(plt.gcf(), "nn_training_history.png")
-            plt.close()
-            
-            # Confusion matrix
-            plt.figure(figsize=(8, 6))
-            cm = confusion_matrix(y_val, val_preds)
-            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
-            plt.title(f'Neural Network Confusion Matrix\nRecall: {metrics["nn_val_recall"]:.2f}')
-            plt.ylabel('True Label')
-            plt.xlabel('Predicted Label')
-            mlflow.log_figure(plt.gcf(), "nn_confusion_matrix.png")
-            plt.close()
-            
-            # Feature importance analysis using integrated gradients
-            ig = IntegratedGradients(self.nn_model)
-            attributions = ig.attribute(X_train_tensor[:100], target=1)
-            importance_dict = dict(zip(
-                self.feature_names,
-                np.mean(abs(attributions.detach().numpy()), axis=0)
-            ))
-            
-            # Add feature importance to metrics
-            sorted_importance = sorted(importance_dict.items(), key=lambda x: x[1], reverse=True)[:20]
-            for k, v in sorted_importance:
-                metrics[f'nn_importance_{k}'] = float(v)
-
-            # Log feature attributions
-            plt.figure(figsize=(12, 6))
-            plt.bar([x[0] for x in sorted_importance], [x[1] for x in sorted_importance])
-            plt.xticks(rotation=45, ha='right')
-            plt.title('Neural Network Feature Importance (Integrated Gradients)')
-            plt.tight_layout()
-            mlflow.log_figure(plt.gcf(), "nn_feature_importance.png")
-            plt.close()
-            
-            return metrics, importance_dict
+        probas = self.predict_proba(X)
+        return (probas[:, 1] >= threshold).astype(int)
     
+    def predict_model(self, X, model_name):
+        """Get predictions from a specific model using its optimized threshold"""
+        if model_name not in self.thresholds:
+            raise ValueError(f"Unknown model: {model_name}")
+        
+        if model_name == 'xgboost':
+            probs = self.xgb_model.predict_proba(X)[:, 1]
+        elif model_name == 'random_forest':
+            probs = self.rf_model.predict_proba(X)[:, 1]
+        elif model_name == 'neural_network':
+            probs = self.nn_model(torch.FloatTensor(X)).detach().numpy()[:, 1]
+        else:
+            raise ValueError(f"Unsupported model: {model_name}")
+        
+        return (probs >= self.thresholds[model_name]).astype(int)
+
     def train(self, X_train, y_train, X_val, y_val):
         """Train all models in the ensemble with comprehensive logging"""
         print(f"Training ensemble with input dimension: {self.input_dim}")
@@ -481,18 +232,13 @@ class FraudDetectionEnsemble:
         rf_metrics, rf_importance = self._train_random_forest(X_train, y_train, X_val, y_val)
         nn_metrics, nn_importance = self._train_neural_network(X_train, y_train, X_val, y_val)
         
-        # Get ensemble predictions
-        xgb_val_probs = self.xgb_model.predict_proba(X_val)[:, 1]
-        rf_val_probs = self.rf_model.predict_proba(X_val)[:, 1]
-        nn_val_probs = self.nn_model(torch.FloatTensor(X_val)).detach().numpy()[:, 1]
+        # Optimize weights and thresholds
+        self._optimize_weights(X_val, y_val)
+        self._optimize_model_thresholds(X_val, y_val, metric='f1')
         
-        # Calculate weighted ensemble predictions
-        ensemble_val_probs = (
-            self.weights[0] * xgb_val_probs +
-            self.weights[1] * rf_val_probs +
-            self.weights[2] * nn_val_probs
-        )
-        ensemble_val_preds = (ensemble_val_probs >= 0.5).astype(int)
+        # Get ensemble predictions using optimized weights and thresholds
+        ensemble_val_probs = self.predict_proba(X_val)[:, 1]
+        ensemble_val_preds = self.predict(X_val)
         
         # Calculate ensemble metrics
         ensemble_metrics = {
@@ -500,161 +246,92 @@ class FraudDetectionEnsemble:
             'ensemble_val_accuracy': accuracy_score(y_val, ensemble_val_preds),
             'ensemble_val_precision': precision_score(y_val, ensemble_val_preds),
             'ensemble_val_recall': recall_score(y_val, ensemble_val_preds),
-            'ensemble_val_f1': f1_score(y_val, ensemble_val_preds)
+            'ensemble_val_f1': f1_score(y_val, ensemble_val_preds),
+            'ensemble_threshold': self.thresholds['ensemble']
         }
         
-        # Calculate and log ensemble feature importance
-        ensemble_importance = {}
-        for feature in self.feature_names:
-            ensemble_importance[feature] = (
-                self.weights[0] * xgb_importance.get(feature, 0) +
-                self.weights[1] * rf_importance.get(feature, 0) +
-                self.weights[2] * nn_importance.get(feature, 0)
-            )
-        
-        # Log ensemble feature importance
-        sorted_ensemble_importance = sorted(
-            ensemble_importance.items(),
-            key=lambda x: x[1],
-            reverse=True
-        )[:20]
-        
-        ensemble_importance_metrics = {
-            f'ensemble_importance_{k}': v
-            for k, v in sorted_ensemble_importance
-        }
-        mlflow.log_metrics(ensemble_importance_metrics)
-        
-        # Log ensemble importance plot
-        plt.figure(figsize=(12, 6))
-        plt.bar([x[0] for x in sorted_ensemble_importance],
-                [x[1] for x in sorted_ensemble_importance])
-        plt.xticks(rotation=45, ha='right')
-        plt.title('Ensemble Feature Importance')
-        plt.tight_layout()
-        mlflow.log_figure(plt.gcf(), "ensemble_feature_importance.png")
-        plt.close()
-        
-        # Log ensemble confusion matrix
-        plt.figure(figsize=(8, 6))
-        cm = confusion_matrix(y_val, ensemble_val_preds)
-        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
-        plt.title('Ensemble Confusion Matrix (Validation)')
-        plt.ylabel('True Label')
-        plt.xlabel('Predicted Label')
-        mlflow.log_figure(plt.gcf(), "ensemble_confusion_matrix.png")
-        plt.close()
-        
-        # Log ensemble ROC curve
-        plt.figure(figsize=(8, 6))
-        fpr, tpr, _ = roc_curve(y_val, ensemble_val_probs)
-        plt.plot(fpr, tpr, label=f'Ensemble (AUC = {ensemble_metrics["ensemble_val_auc"]:.3f})')
-        plt.plot([0, 1], [0, 1], 'k--')
-        plt.xlabel('False Positive Rate')
-        plt.ylabel('True Positive Rate')
-        plt.title('Ensemble ROC Curve')
-        plt.legend()
-        plt.tight_layout()
-        mlflow.log_figure(plt.gcf(), "ensemble_roc_curve.png")
-        plt.close()
-        
-        # Log comparison plot of all models
-        plt.figure(figsize=(10, 6))
-        models = ['XGBoost', 'Random Forest', 'Neural Network', 'Ensemble']
-        metrics = ['AUC', 'F1', 'Precision', 'Recall']
-        values = np.array([
-            [xgb_metrics['xgb_val_auc'], xgb_metrics['xgb_val_f1'],
-            xgb_metrics['xgb_val_precision'], xgb_metrics['xgb_val_recall']],
-            [rf_metrics['rf_val_auc'], rf_metrics['rf_val_f1'],
-            rf_metrics['rf_val_precision'], rf_metrics['rf_val_recall']],
-            [nn_metrics['nn_val_auc'], nn_metrics['nn_val_f1'],
-            nn_metrics['nn_val_precision'], nn_metrics['nn_val_recall']],
-            [ensemble_metrics['ensemble_val_auc'], ensemble_metrics['ensemble_val_f1'],
-            ensemble_metrics['ensemble_val_precision'], ensemble_metrics['ensemble_val_recall']]
-        ])
-        
-        x = np.arange(len(metrics))
-        width = 0.15
-        
-        for i in range(len(models)):
-            plt.bar(x + i*width, values[i], width, label=models[i])
-        
-        plt.xlabel('Metrics')
-        plt.ylabel('Score')
-        plt.title('Model Performance Comparison')
-        plt.xticks(x + width*1.5, metrics)
-        plt.legend(loc='lower right')
-        plt.tight_layout()
-        mlflow.log_figure(plt.gcf(), "model_comparison.png")
-        plt.close()
+        # Add threshold information to metrics
+        for model in ['xgboost', 'random_forest', 'neural_network']:
+            metrics_dict = locals()[f"{model.split('_')[0]}_metrics"]
+            metrics_dict[f'{model}_threshold'] = self.thresholds[model]
         
         # Compile all metrics
         all_metrics = {
             'xgboost': xgb_metrics,
             'random_forest': rf_metrics,
             'neural_network': nn_metrics,
-            'ensemble': ensemble_metrics
+            'ensemble': ensemble_metrics,
+            'weights': self.weights,
+            'thresholds': self.thresholds
         }
-        
-        # Log all metrics
-        mlflow.log_dict(all_metrics, 'all_metrics.json')
-        
-        # Log feature importance comparison
-        feature_importance_comparison = pd.DataFrame({
-            'XGBoost': pd.Series(xgb_importance),
-            'Random Forest': pd.Series(rf_importance),
-            'Neural Network': pd.Series(nn_importance),
-            'Ensemble': pd.Series(ensemble_importance)
-        })
-
-        mlflow.log_dict(feature_importance_comparison.to_dict(), 'feature_importance_comparison.json')
         
         return all_metrics
 
+    def get_optimized_parameters(self):
+        """Return current optimized parameters"""
+        return {
+            'weights': self.weights,
+            'thresholds': self.thresholds
+        }
+
+
 def train_fraud_detection_system(raw_data, test_size=0.25):
-    """Main training function with comprehensive logging and validation"""
+    """Main training function with improved validation and ensemble strategy"""
     print("Starting fraud detection system training...")
     
     # Initialize preprocessor
     preprocessor = TransactionPreprocessor()
+    
+    # Validate input data first
+    print("Validating input data...")
+    issues = preprocessor.validate_features(raw_data)
+    if issues:
+        print("Data validation issues found:")
+        for issue in issues:
+            print(f"- {issue}")
+        return None
+    
     print("Preprocessing data and engineering features...")
     
-    # Get feature names
-    feature_names = []
-    for group in sorted(preprocessor.feature_groups.keys()):
-        feature_names.extend(preprocessor.feature_groups[group])
-
-
-    cv_metrics = []
-
+    # Get feature names and metadata
+    feature_names = preprocessor.get_feature_names()
+    feature_metadata = preprocessor.get_feature_metadata()
+    
     # Sort by time and create time-based split
+    raw_data['TX_DATETIME'] = pd.to_datetime(raw_data['TX_DATETIME'])
     raw_data = raw_data.sort_values('TX_DATETIME')
-    split_idx = int(len(raw_data) * (1 - test_size))
     
-    # Split data first to avoid data leakage
-    train_data = raw_data.iloc[:split_idx]
-    val_data = raw_data.iloc[split_idx:]
-
-    # # Split data first to avoid data leakage
-    # train_data, val_data = train_test_split(
-    #     raw_data, 
-    #     test_size=test_size, 
-    #     random_state=42,
-    #     stratify=raw_data['TX_FRAUD']  # Ensure balanced split
-    # )
+    # Use time-based split with validation buffer
+    train_end_date = raw_data['TX_DATETIME'].quantile(0.6)
+    val_start_date = raw_data['TX_DATETIME'].quantile(0.6)
+    val_end_date = raw_data['TX_DATETIME'].quantile(0.8)
+    test_start_date = raw_data['TX_DATETIME'].quantile(0.8)
     
-    # Process training data
-    print("Processing training data...")
+    train_data = raw_data[raw_data['TX_DATETIME'] <= train_end_date]
+    val_data = raw_data[(raw_data['TX_DATETIME'] > val_start_date) & 
+                        (raw_data['TX_DATETIME'] <= val_end_date)]
+    test_data = raw_data[raw_data['TX_DATETIME'] > test_start_date]
+    
+    # Generate feature report
+    print("\nGenerating feature report...")
+    feature_report = preprocessor.generate_feature_report(train_data)
+    
+    # Process data for each split
+    print("\nProcessing training data...")
     feature_groups_train, y_train_resampled = preprocessor.transform(train_data, training=True)
     
-    # Process validation data (without SMOTE)
     print("Processing validation data...")
     feature_groups_val = preprocessor.transform(val_data, training=False)
     y_val = val_data['TX_FRAUD'].values
     
+    print("Processing test data...")
+    feature_groups_test = preprocessor.transform(test_data, training=False)
+    y_test = test_data['TX_FRAUD'].values
+    
     # Convert feature groups to numpy arrays
     X_train = np.concatenate([feature_groups_train[group] for group in preprocessor.feature_groups.keys()], axis=1)
     X_val = np.concatenate([feature_groups_val[group] for group in preprocessor.feature_groups.keys()], axis=1)
+    X_test = np.concatenate([feature_groups_test[group] for group in preprocessor.feature_groups.keys()], axis=1)
     
     # Print and log data statistics
     print("\nData Statistics:")
@@ -662,107 +339,183 @@ def train_fraud_detection_system(raw_data, test_size=0.25):
         'total_samples': len(raw_data),
         'training_samples': len(X_train),
         'validation_samples': len(X_val),
+        'test_samples': len(X_test),
         'feature_dimension': X_train.shape[1],
         'original_fraud_ratio': float(raw_data['TX_FRAUD'].mean()),
         'training_fraud_ratio': float(y_train_resampled.mean()),
-        'validation_fraud_ratio': float(y_val.mean())
+        'validation_fraud_ratio': float(y_val.mean()),
+        'test_fraud_ratio': float(y_test.mean())
     }
     
     for stat, value in data_stats.items():
         print(f"{stat}: {value}")
-        
-    # Initialize and train ensemble
+    
+    # Initialize ensemble with dynamic weight optimization
     print("\nInitializing ensemble model...")
     ensemble = FraudDetectionEnsemble(
         input_dim=X_train.shape[1],
-        feature_names=feature_names,
-        weights=[0.4, 0.3, 0.3]  # Adjustable weights for ensemble
+        feature_names=feature_names
     )
     
-    
-    with mlflow.start_run(run_name="fraud_detection_ensemble", experiment_id=
-                          mlflow.get_experiment_by_name("/Users/kehinde.awomuti@pwc.com/fraud_detection_train").experiment_id) as run:
-        # Log dataset info
+    with mlflow.start_run(run_name="fraud_detection_ensemble") as run:
+        # Log dataset info and feature metadata
         mlflow.log_params(data_stats)
-
-        # Log feature groups information
-        feature_dims = {group: features.shape[1] for group, features in feature_groups_train.items()}
-        mlflow.log_dict(feature_dims, 'feature_dimensions.json')
+        mlflow.log_dict(feature_metadata, 'feature_metadata.json')
+        mlflow.log_dict(feature_report, 'feature_report.json')
         
-        # Train ensemble and get metrics
+        # Train ensemble with validation monitoring
         print("\nTraining ensemble...")
         metrics = ensemble.train(X_train, y_train_resampled, X_val, y_val)
+        
+        # Optimize ensemble weights using validation performance
+        print("\nOptimizing ensemble weights...")
+        ensemble._optimize_weights(X_val, y_val)
+        
+        # Evaluate on test set
+        print("\nEvaluating on test set...")
+        test_metrics = evaluate_ensemble(ensemble, X_test, y_test)
+        metrics['test'] = test_metrics
         
         # Log final metrics summary
         mlflow.log_dict(metrics, 'final_metrics.json')
         
+        # Prepare model artifacts
         input_example = pd.DataFrame(X_train[:1], columns=feature_names)
-
-        signature = mlflow.models.signature.infer_signature(X_train, ensemble.xgb_model.predict_proba(X_train))
-
-        # Log XGBoost model with signature and register
-        mlflow.sklearn.log_model(
-            ensemble.xgb_model, 
-            "xgboost_model",
-            signature=signature,
-            input_example=input_example,
-            registered_model_name="fd_xgboost"
+        signature = mlflow.models.signature.infer_signature(
+            X_train, 
+            ensemble.xgb_model.predict_proba(X_train)
         )
-
-        # Log Random Forest model with signature and register
-        mlflow.sklearn.log_model(
-            ensemble.rf_model, 
-            "random_forest_model",
-            signature=signature,
-            input_example=input_example,
-            registered_model_name="fd_random_forest"
-        )
-
-        # Log Neural Network model with custom wrapper, signature and register
-        wrapped_nn = FraudDetectionNNWrapper(ensemble.nn_model)
-        nn_signature = mlflow.models.signature.infer_signature(X_train, wrapped_nn.predict(None, pd.DataFrame(X_train, columns=feature_names)))
-        mlflow.pyfunc.log_model(
-            "neural_network_model",
-            python_model=wrapped_nn,
-            signature=nn_signature,
-            input_example=input_example,
-            registered_model_name="fd_torch")     
-
-        # Create and log a summary report
-        summary_report = f"""
-        Fraud Detection Training Summary
-        ==============================
         
-        Dataset Statistics:
-        - Total samples: {data_stats['total_samples']:,}
-        - Training samples: {data_stats['training_samples']:,}
-        - Validation samples: {data_stats['validation_samples']:,}
-        - Feature dimension: {data_stats['feature_dimension']}
-        - Original fraud ratio: {data_stats['original_fraud_ratio']:.3%}
-        - Training fraud ratio: {data_stats['training_fraud_ratio']:.3%}
-        - Validation fraud ratio: {data_stats['validation_fraud_ratio']:.3%}
+        # Log individual models
+        log_models(ensemble, signature, input_example)
         
-        Model Performance (Validation):
-        - XGBoost AUC: {metrics['xgboost']['xgb_val_auc']:.3f}
-        - Random Forest AUC: {metrics['random_forest']['rf_val_auc']:.3f}
-        - Neural Network AUC: {metrics['neural_network']['nn_val_auc']:.3f}
-        - Ensemble AUC: {metrics['ensemble']['ensemble_val_auc']:.3f}
+        # Create and log summary report
+        create_summary_report(data_stats, metrics, feature_metadata)
         
-        Feature Groups:
-        {'-' * 40}
-        """ + '\n'.join([f"- {group}: {dims} features" for group, dims in feature_dims.items()])
-        
-        # Log summary report
-        with open("training_summary.txt", "w") as f:
-            f.write(summary_report)
-        mlflow.log_artifact("training_summary.txt")
+        # Save preprocessor state
+        preprocessor.save_preprocessor('preprocessor_state.pkl')
+        mlflow.log_artifact('preprocessor_state.pkl')
         
         print("\nTraining completed successfully!")
         print(f"MLflow run ID: {run.info.run_id}")
         
-        return preprocessor, ensemble, metrics    
+        return preprocessor, ensemble, metrics
 
-# Define the directory containing the files
+def evaluate_ensemble(ensemble, X, y):
+    """Evaluate ensemble model with comprehensive metrics"""
+    # Get predictions from each model
+    xgb_probs = ensemble.xgb_model.predict_proba(X)[:, 1]
+    rf_probs = ensemble.rf_model.predict_proba(X)[:, 1]
+    nn_probs = ensemble.nn_model(torch.FloatTensor(X)).detach().numpy()[:, 1]
+    
+    # Calculate weighted ensemble predictions
+    ensemble_probs = (
+        ensemble.weights[0] * xgb_probs +
+        ensemble.weights[1] * rf_probs +
+        ensemble.weights[2] * nn_probs
+    )
+    
+    # Calculate threshold-based predictions
+    ensemble_preds = (ensemble_probs >= 0.5).astype(int)
+    
+    # Calculate metrics
+    metrics = {
+        'auc': roc_auc_score(y, ensemble_probs),
+        'accuracy': accuracy_score(y, ensemble_preds),
+        'precision': precision_score(y, ensemble_preds),
+        'recall': recall_score(y, ensemble_preds),
+        'f1': f1_score(y, ensemble_preds),
+        'confusion_matrix': confusion_matrix(y, ensemble_preds).tolist()
+    }
+    
+    # Calculate individual model metrics
+    model_probs = {
+        'xgboost': xgb_probs,
+        'random_forest': rf_probs,
+        'neural_network': nn_probs
+    }
+    
+    for model_name, probs in model_probs.items():
+        preds = (probs >= 0.5).astype(int)
+        metrics[f'{model_name}_auc'] = roc_auc_score(y, probs)
+        metrics[f'{model_name}_precision'] = precision_score(y, preds)
+        metrics[f'{model_name}_recall'] = recall_score(y, preds)
+        metrics[f'{model_name}_f1'] = f1_score(y, preds)
+    
+    return metrics
+
+def log_models(ensemble, signature, input_example):
+    """Log all models with proper signatures and examples"""
+    # Log XGBoost model
+    mlflow.sklearn.log_model(
+        ensemble.xgb_model,
+        "xgboost_model",
+        signature=signature,
+        input_example=input_example,
+        registered_model_name="fd_xgboost"
+    )
+    
+    # Log Random Forest model
+    mlflow.sklearn.log_model(
+        ensemble.rf_model,
+        "random_forest_model",
+        signature=signature,
+        input_example=input_example,
+        registered_model_name="fd_random_forest"
+    )
+    
+    # Log Neural Network model with custom wrapper
+    wrapped_nn = FraudDetectionNNWrapper(ensemble.nn_model)
+    nn_signature = mlflow.models.signature.infer_signature(
+        input_example, 
+        wrapped_nn.predict(None, input_example)
+    )
+    
+    mlflow.pyfunc.log_model(
+        "neural_network_model",
+        python_model=wrapped_nn,
+        signature=nn_signature,
+        input_example=input_example,
+        registered_model_name="fd_neural_network"
+    )
+
+def create_summary_report(data_stats, metrics, feature_metadata):
+    """Create comprehensive training summary report"""
+    summary_report = f"""
+    Fraud Detection Training Summary
+    ==============================
+    
+    Dataset Statistics:
+    - Total samples: {data_stats['total_samples']:,}
+    - Training samples: {data_stats['training_samples']:,}
+    - Validation samples: {data_stats['validation_samples']:,}
+    - Test samples: {data_stats['test_samples']:,}
+    - Feature dimension: {data_stats['feature_dimension']}
+    - Original fraud ratio: {data_stats['original_fraud_ratio']:.3%}
+    - Training fraud ratio: {data_stats['training_fraud_ratio']:.3%}
+    - Validation fraud ratio: {data_stats['validation_fraud_ratio']:.3%}
+    - Test fraud ratio: {data_stats['test_fraud_ratio']:.3%}
+    
+    Model Performance:
+    - XGBoost AUC: {metrics['test']['xgboost_auc']:.3f}
+    - Random Forest AUC: {metrics['test']['random_forest_auc']:.3f}
+    - Neural Network AUC: {metrics['test']['neural_network_auc']:.3f}
+    - Ensemble AUC: {metrics['test']['auc']:.3f}
+    
+    Feature Groups:
+    {'-' * 40}
+    """
+    
+    for group, metadata in feature_metadata.items():
+        summary_report += f"\n- {group}: {metadata['feature_count']} features"
+        summary_report += f"\n  Scaler: {metadata['scaler_type']}"
+        summary_report += f"\n  Imputation: {metadata['imputer_strategy']}"
+    
+    with open("training_summary.txt", "w") as f:
+        f.write(summary_report)
+    mlflow.log_artifact("training_summary.txt")# Define the directory containing the files
+
+
 directory = '/Workspace/Users/kehinde.awomuti@pwc.com/ccfrauddetection/data'
 # List to store DataFrames
 df_list = []
@@ -778,4 +531,4 @@ combined_df = pd.concat(df_list, ignore_index=True)
 pos_df = combined_df[combined_df['TX_FRAUD'] == 1].iloc[:30]
 neg_df = combined_df[combined_df['TX_FRAUD'] == 0].iloc[:5000]
 df2 = pd.concat([pos_df, neg_df], ignore_index=True, axis= 0)
-preprocessor, ensemble, metrics = train_fraud_detection_system(combined_df)
+preprocessor, ensemble, metrics = train_fraud_detection_system(df2)
