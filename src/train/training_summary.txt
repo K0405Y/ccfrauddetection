@@ -4,18 +4,18 @@
         
         Dataset Statistics:
         - Total samples: 151,958
-        - Training samples: 199,686
+        - Training samples: 128,392
         - Validation samples: 37,990
         - Feature dimension: 37
         - Original fraud ratio: 2.660%
-        - Training fraud ratio: 44.444%
-        - Validation fraud ratio: 2.661%
+        - Training fraud ratio: 13.043%
+        - Validation fraud ratio: 4.528%
         
         Model Performance (Validation):
-        - XGBoost AUC: 0.507
-        - Random Forest AUC: 0.513
-        - Neural Network AUC: 0.503
-        - Ensemble AUC: 0.503
+        - XGBoost AUC: 0.495
+        - Random Forest AUC: 0.504
+        - Neural Network AUC: 0.500
+        - Ensemble AUC: 0.501
         
         Feature Groups:
         ----------------------------------------

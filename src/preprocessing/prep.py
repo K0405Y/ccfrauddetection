@@ -230,15 +230,16 @@ class TransactionPreprocessor:
             # Apply SMOTE
             n_minority = (y == 1).sum()
             n_majority = (y == 0).sum()
-            target_minority = int(n_majority * 0.8)
+            target_minority = int(n_majority * 0.15)
             
             print(f"\nTraining Data Class distribution before SMOTE:")
             print(f"Non-fraud: {n_majority}, Fraud: {n_minority}")
             
             smote = SMOTE(
-                sampling_strategy={1: target_minority},
+                sampling_strategy={1: min(target_minority, n_majority)},
                 random_state=42,
-                k_neighbors=min(5, n_minority - 1)
+                k_neighbors=min(5, n_minority - 1), 
+                n_jobs= 1
             )
             
             X_resampled, y_resampled = smote.fit_resample(X, y)

@@ -4,7 +4,7 @@ from src.preprocessing.prep import TransactionPreprocessor
 import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import  train_test_split
+from sklearn.model_selection import  train_test_split, TimeSeriesSplit
 from sklearn.metrics import roc_auc_score, precision_score, accuracy_score, recall_score, f1_score, confusion_matrix, roc_curve
 from sklearn.inspection import permutation_importance
 import xgboost as xgb
@@ -28,14 +28,15 @@ class FraudDetectionNN(nn.Module):
             nn.Linear(input_dim, 64),
             nn.BatchNorm1d(64),
             nn.ReLU(),
-            nn.Dropout(0.3),
+            nn.Dropout(0.4),
             nn.Linear(64, 32),
             nn.BatchNorm1d(32),
             nn.ReLU(),
-            nn.Dropout(0.2),
+            nn.Dropout(0.3),
             nn.Linear(32, 16),
             nn.BatchNorm1d(16),
             nn.ReLU(),
+            nn.Dropout(0.2),
             nn.Linear(16, 2)
         )
         # Initialize weights
@@ -76,11 +77,16 @@ class FraudDetectionEnsemble:
         weight_ratio = (1/0.4)
         self.class_weights = {0: 1, 1: weight_ratio}
 
-
         self.xgb_model = xgb.XGBClassifier(
-            max_depth=5,
+            max_depth=4,
             learning_rate=0.1,
-            n_estimators=100,
+            n_estimators=200,
+            min_child_weight = 5,
+            subsample = 0.8,
+            colsample_bytree = 0.8,
+            gamma = 1,
+            reg_alpha = 0.1,
+            reg_lambda = 0.1,
             eval_metric='auc',
             use_label_encoder=False,
             objective= 'binary:logistic',
@@ -88,15 +94,34 @@ class FraudDetectionEnsemble:
         )
         
         self.rf_model = RandomForestClassifier(
-            n_estimators=100,
-            max_depth=10,
+            n_estimators=200,
+            max_depth=8,
+            min_samples_leaf=4,
+            min_samples_split=10,
+            max_features='sqrt',
             random_state=42,
             class_weight=self.class_weights,
-            criterion='entropy'
+            criterion='entropy',
+            n_jobs= 1
         )
         
         self.nn_model = FraudDetectionNN(input_dim)
-      
+    
+    def _optimize_threshold(self, y_true, y_prob):
+        """Optimize threshold using F1 score"""
+        thresholds = np.linspace(0.1, 0.9, 100)
+        best_threshold = 0.5
+        best_f1 = 0
+        
+        for threshold in thresholds:
+            y_pred = (y_prob >= threshold).astype(int)
+            f1 = f1_score(y_true, y_pred)
+            if f1 > best_f1:
+                best_f1 = f1
+                best_threshold = threshold
+        
+        return best_threshold
+  
 
     def _train_xgboost(self, X_train, y_train, X_val, y_val):
         """Train XGBoost model with comprehensive metrics and feature importance"""
@@ -295,6 +320,16 @@ class FraudDetectionEnsemble:
             lr=0.001,
             weight_decay=0.01
         )
+
+        patience = 10
+        best_val_loss = float('inf')
+        patience_counter = 0
+
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 
+                                                               patience=patience, 
+                                                               verbose=True, 
+                                                               mode='min', 
+                                                               factor=0.5)
         
     # Initialize tracking
         best_recall = 0
@@ -344,6 +379,21 @@ class FraudDetectionEnsemble:
                     'nn_val_recall': history['val_recall'][-1],
                     'nn_val_precision': history['val_precision'][-1]
                 }, step=epoch)
+                
+                # Learning rate scheduling
+                scheduler.step(val_loss)
+                
+                # Early stopping
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    best_model_state = self.nn_model.state_dict().copy()
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                    
+                if patience_counter >= patience:
+                    print(f"Early stopping triggered at epoch {epoch}")
+                    break
         
         # Restore best model
         if best_model_state:
@@ -398,59 +448,30 @@ class FraudDetectionEnsemble:
             mlflow.log_figure(plt.gcf(), "nn_confusion_matrix.png")
             plt.close()
             
-            # Plot recall vs threshold curve
-            plt.figure(figsize=(8, 6))
-            thresholds = np.linspace(0, 1, 100)
-            recalls = [recall_score(y_val, (val_probs >= t).astype(int)) for t in thresholds]
-            plt.plot(thresholds, recalls)
-            plt.axvline(x=best_threshold, color='r', linestyle='--', 
-                    label=f'Best Threshold: {best_threshold:.2f}')
-            plt.xlabel('Threshold')
-            plt.ylabel('Recall')
-            plt.title('Recall vs Threshold')
-            plt.legend()
+            # Feature importance analysis using integrated gradients
+            ig = IntegratedGradients(self.nn_model)
+            attributions = ig.attribute(X_train_tensor[:100], target=1)
+            importance_dict = dict(zip(
+                self.feature_names,
+                np.mean(abs(attributions.detach().numpy()), axis=0)
+            ))
+            
+            # Add feature importance to metrics
+            sorted_importance = sorted(importance_dict.items(), key=lambda x: x[1], reverse=True)[:20]
+            for k, v in sorted_importance:
+                metrics[f'nn_importance_{k}'] = float(v)
+
+            # Log feature attributions
+            plt.figure(figsize=(12, 6))
+            plt.bar([x[0] for x in sorted_importance], [x[1] for x in sorted_importance])
+            plt.xticks(rotation=45, ha='right')
+            plt.title('Neural Network Feature Importance (Integrated Gradients)')
             plt.tight_layout()
-            mlflow.log_figure(plt.gcf(), "nn_recall_threshold.png")
+            mlflow.log_figure(plt.gcf(), "nn_feature_importance.png")
             plt.close()
-
-            # Log ROC curve
-            plt.figure(figsize=(8, 6))
-            fpr, tpr, _ = roc_curve(y_val, val_probs)
-            plt.plot(fpr, tpr)
-            plt.plot([0, 1], [0, 1], 'k--')
-            plt.xlabel('False Positive Rate')
-            plt.ylabel('True Positive Rate')
-            plt.title(f'Neural Network ROC Curve (AUC = {metrics["nn_val_auc"]:.2f})')
-            mlflow.log_figure(plt.gcf(), "nn_roc_curve.png")
-            plt.close()
-                
-            mlflow.log_metrics(metrics)
-        
-
-        # Feature importance analysis
-        ig = IntegratedGradients(self.nn_model)
-        attributions = ig.attribute(X_train_tensor[:100], target=1)
-        importance_dict = dict(zip(
-            self.feature_names,
-            np.mean(abs(attributions.detach().numpy()), axis=0)
-        ))
-        # Add feature importance to metrics
-        sorted_importance = sorted(importance_dict.items(), key=lambda x: x[1], reverse=True)[:20]
-        for k, v in sorted_importance:
-            metrics[f'nn_importance_{k}'] = float(v)
-
-        # Log feature attributions
-        plt.figure(figsize=(12, 6))
-        sorted_importance = sorted(importance_dict.items(), key=lambda x: x[1], reverse=True)[:20]
-        plt.bar([x[0] for x in sorted_importance], [x[1] for x in sorted_importance])
-        plt.xticks(rotation=45, ha='right')
-        plt.title('Neural Network Feature Importance (Integrated Gradients)')
-        plt.tight_layout()
-        mlflow.log_figure(plt.gcf(), "nn_feature_importance.png")
-        plt.close()
-        
-        return metrics, importance_dict
-
+            
+            return metrics, importance_dict
+    
     def train(self, X_train, y_train, X_val, y_val):
         """Train all models in the ensemble with comprehensive logging"""
         print(f"Training ensemble with input dimension: {self.input_dim}")
@@ -602,14 +623,25 @@ def train_fraud_detection_system(raw_data, test_size=0.25):
     feature_names = []
     for group in sorted(preprocessor.feature_groups.keys()):
         feature_names.extend(preprocessor.feature_groups[group])
+
+
+    cv_metrics = []
+
+    # Sort by time and create time-based split
+    raw_data = raw_data.sort_values('TX_DATETIME')
+    split_idx = int(len(raw_data) * (1 - test_size))
     
     # Split data first to avoid data leakage
-    train_data, val_data = train_test_split(
-        raw_data, 
-        test_size=test_size, 
-        random_state=42,
-        stratify=raw_data['TX_FRAUD']  # Ensure balanced split
-    )
+    train_data = raw_data.iloc[:split_idx]
+    val_data = raw_data.iloc[split_idx:]
+
+    # # Split data first to avoid data leakage
+    # train_data, val_data = train_test_split(
+    #     raw_data, 
+    #     test_size=test_size, 
+    #     random_state=42,
+    #     stratify=raw_data['TX_FRAUD']  # Ensure balanced split
+    # )
     
     # Process training data
     print("Processing training data...")
