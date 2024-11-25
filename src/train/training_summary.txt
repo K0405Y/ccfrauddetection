@@ -1,26 +1,39 @@
 
-        Fraud Detection Training Summary
-        ==============================
-        
-        Dataset Statistics:
-        - Total samples: 151,958
-        - Training samples: 128,392
-        - Validation samples: 37,990
-        - Feature dimension: 37
-        - Original fraud ratio: 2.660%
-        - Training fraud ratio: 13.043%
-        - Validation fraud ratio: 4.528%
-        
-        Model Performance (Validation):
-        - XGBoost AUC: 0.495
-        - Random Forest AUC: 0.504
-        - Neural Network AUC: 0.500
-        - Ensemble AUC: 0.501
-        
-        Feature Groups:
-        ----------------------------------------
-        - temporal: 7 features
+    Fraud Detection Training Summary
+    ==============================
+    
+    Dataset Statistics:
+    - Total samples: 151,958
+    - Training samples: 103,077
+    - Validation samples: 30,391
+    - Test samples: 30,392
+    - Feature dimension: 37
+    - Original fraud ratio: 2.660%
+    - Training fraud ratio: 13.043%
+    - Validation fraud ratio: 3.557%
+    - Test fraud ratio: 4.669%
+    
+    Model Performance:
+    - XGBoost AUC: 0.514
+    - Random Forest AUC: 0.501
+    - Neural Network AUC: 0.511
+    - Ensemble AUC: 0.501
+    
+    Feature Groups:
+    ----------------------------------------
+    
+- temporal: 7 features
+  Scaler: StandardScaler
+  Imputation: median
 - amount: 7 features
+  Scaler: RobustScaler
+  Imputation: median
 - customer: 4 features
+  Scaler: StandardScaler
+  Imputation: median
 - terminals: 8 features
+  Scaler: StandardScaler
+  Imputation: median
 - sequence: 11 features
+  Scaler: RobustScaler
+  Imputation: median
