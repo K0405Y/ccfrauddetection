@@ -25,17 +25,15 @@ warnings.filterwarnings("ignore")
 class FraudDetectionNN(nn.Module):
     def __init__(self, input_dim):
         super(FraudDetectionNN, self).__init__()
+        # Modified architecture without BatchNorm for small batches
         self.model = nn.Sequential(
             nn.Linear(input_dim, 64),
-            nn.BatchNorm1d(64),
             nn.ReLU(),
             nn.Dropout(0.4),
             nn.Linear(64, 32),
-            nn.BatchNorm1d(32),
             nn.ReLU(),
             nn.Dropout(0.3),
             nn.Linear(32, 16),
-            nn.BatchNorm1d(16),
             nn.ReLU(),
             nn.Dropout(0.2),
             nn.Linear(16, 2)
@@ -49,7 +47,8 @@ class FraudDetectionNN(nn.Module):
     def forward(self, x):
         logits = self.model(x)
         return nn.functional.softmax(logits, dim=1)
-        
+
+
 class FraudDetectionNNWrapper(mlflow.pyfunc.PythonModel):
     def __init__(self, model):
         self.model = model
@@ -280,7 +279,7 @@ class FraudDetectionEnsemble:
         return metrics, importance
 
     def _train_neural_network(self, X_train, y_train, X_val, y_val):
-        """Train Neural Network model with validation monitoring"""
+        """Modified Neural Network training with adjusted batch size and parameters"""
         print("\nTraining Neural Network model...")
         
         # Convert data to tensors
@@ -288,34 +287,51 @@ class FraudDetectionEnsemble:
         y_train_tensor = torch.LongTensor(y_train)
         X_val_tensor = torch.FloatTensor(X_val)
         
-        # Define training parameters
+        # Define training parameters with adjusted batch size
         criterion = nn.CrossEntropyLoss(weight=torch.FloatTensor([1, self.class_weights[1]]))
-        optimizer = torch.optim.Adam(self.nn_model.parameters(), lr=0.001)
-        batch_size = 32
-        n_epochs = 50
+        optimizer = torch.optim.Adam(self.nn_model.parameters(), lr=0.001, weight_decay=1e-5)
+        
+        # Adjust batch size based on dataset size
+        batch_size = min(32, len(X_train) // 10)  # Ensure at least 10 batches
+        batch_size = max(batch_size, 4)  # Ensure batch size is at least 4
+        
+        n_epochs = 100
         best_val_auc = 0
-        patience = 5
+        patience = 10
         patience_counter = 0
         
-        # Create data loaders
+        # Create data loaders with adjusted batch size
         train_dataset = torch.utils.data.TensorDataset(X_train_tensor, y_train_tensor)
         train_loader = torch.utils.data.DataLoader(
             train_dataset,
             batch_size=batch_size,
-            shuffle=True
+            shuffle=True,
+            drop_last=True  # Drop last batch if incomplete
         )
         
-        # Training loop
+        # Training loop with improved monitoring
         for epoch in range(n_epochs):
             self.nn_model.train()
             total_loss = 0
+            batch_count = 0
+            
             for X_batch, y_batch in train_loader:
+                if len(X_batch) < 2:  # Skip batches that are too small
+                    continue
+                    
                 optimizer.zero_grad()
                 output = self.nn_model(X_batch)
                 loss = criterion(output, y_batch)
                 loss.backward()
+                
+                # Gradient clipping to prevent exploding gradients
+                torch.nn.utils.clip_grad_norm_(self.nn_model.parameters(), max_norm=1.0)
+                
                 optimizer.step()
                 total_loss += loss.item()
+                batch_count += 1
+            
+            avg_loss = total_loss / batch_count if batch_count > 0 else float('inf')
             
             # Validation
             self.nn_model.eval()
@@ -324,8 +340,9 @@ class FraudDetectionEnsemble:
                 val_probs = val_output.numpy()[:, 1]
                 val_preds = (val_probs >= 0.5).astype(int)
                 val_auc = roc_auc_score(y_val, val_probs)
+                val_f1 = f1_score(y_val, val_preds)
             
-            # Early stopping
+            # Early stopping with improved criteria
             if val_auc > best_val_auc:
                 best_val_auc = val_auc
                 patience_counter = 0
@@ -338,7 +355,7 @@ class FraudDetectionEnsemble:
                 break
             
             if (epoch + 1) % 10 == 0:
-                print(f"Epoch {epoch + 1}/{n_epochs}, Loss: {total_loss/len(train_loader):.4f}, Val AUC: {val_auc:.4f}")
+                print(f"Epoch {epoch + 1}/{n_epochs}, Loss: {avg_loss:.4f}, Val AUC: {val_auc:.4f}, Val F1: {val_f1:.4f}")
         
         # Restore best model
         self.nn_model.load_state_dict(best_state)
@@ -358,13 +375,13 @@ class FraudDetectionEnsemble:
             'neural_network_val_f1': f1_score(y_val, val_preds)
         }
         
-        # Get feature importance using integrated gradients
+        # Feature importance using integrated gradients
         ig = IntegratedGradients(self.nn_model)
         attributions = ig.attribute(X_val_tensor, target=1)
         importance = attributions.mean(dim=0).abs().numpy()
         
         return metrics, importance
-
+        
     def _optimize_weights(self, X_val, y_val):
         """Optimize ensemble weights using validation set performance"""
         print("\nOptimizing ensemble weights...")
@@ -631,6 +648,7 @@ def evaluate_ensemble(ensemble, X, y):
         metrics[f'{model_name}_precision'] = precision_score(y, preds)
         metrics[f'{model_name}_recall'] = recall_score(y, preds)
         metrics[f'{model_name}_f1'] = f1_score(y, preds)
+        metrics[f'{model_name}_accuracy'] = accuracy_score(y, preds)
     
     return metrics
 
@@ -691,6 +709,22 @@ def create_summary_report(data_stats, metrics, feature_metadata):
     - Random Forest AUC: {metrics['test']['random_forest_auc']:.3f}
     - Neural Network AUC: {metrics['test']['neural_network_auc']:.3f}
     - Ensemble AUC: {metrics['test']['auc']:.3f}
+    - XGBoost Recall: {metrics['test']['xgboost_recall']:.3f}
+    - Random Forest Recall: {metrics['test']['random_forest_recall']:.3f}
+    - Neural Network Recall: {metrics['test']['neural_network_recall']:.3f}
+    - Ensemble Recall: {metrics['test']['recall']:.3f}
+    - XGBoost Precsion: {metrics['test']['xgboost_precision']:.3f}
+    - Random Forest Precision: {metrics['test']['random_forest_precision']:.3f}
+    - Neural Network Precision: {metrics['test']['neural_network_precision']:.3f}
+    - Ensemble Precision: {metrics['test']['precision']:.3f}
+    - XGBoost Accuracy: {metrics['test']['xgboost_accuracy']:.3f}
+    - Random Forest Accuracy: {metrics['test']['random_forest_accuracy']:.3f}
+    - Neural Network Accuracy: {metrics['test']['neural_network_accuracy']:.3f}
+    - Ensemble Accuracy: {metrics['test']['accuracy']:.3f}
+    - XGBoost F1: {metrics['test']['xgboost_f1']:.3f}
+    - Random Forest F1: {metrics['test']['random_forest_f1']:.3f}
+    - Neural Network F1: {metrics['test']['neural_network_f1']:.3f}
+    - Ensemble F1: {metrics['test']['f1']:.3f}"
     
     Feature Groups:
     {'-' * 40}
@@ -718,7 +752,7 @@ for filename in os.listdir(directory):
 
 # Concatenate all DataFrames into a single DataFrame
 combined_df = pd.concat(df_list, ignore_index=True)
-pos_df = combined_df[combined_df['TX_FRAUD'] == 1].iloc[:20]
-neg_df = combined_df[combined_df['TX_FRAUD'] == 0].iloc[:500]
+pos_df = combined_df[combined_df['TX_FRAUD'] == 1].iloc[:100]
+neg_df = combined_df[combined_df['TX_FRAUD'] == 0].iloc[:10000]
 df2 = pd.concat([pos_df, neg_df], ignore_index=True, axis= 0)
-preprocessor, ensemble, metrics = train_fraud_detection_system(df2)
+preprocessor, ensemble, metrics = train_fraud_detection_system(combined_df)
