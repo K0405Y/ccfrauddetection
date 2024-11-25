@@ -10,7 +10,6 @@ from imblearn.over_sampling import SMOTE
 from category_encoders import TargetEncoder
 import holidays
 import warnings
-import pickle as pkl
 warnings.filterwarnings('ignore')
 
 class TransactionPreprocessor:
@@ -56,6 +55,335 @@ class TransactionPreprocessor:
                 self.scalers[group] = StandardScaler()
             self.imputers[group] = SimpleImputer(strategy='median')
 
+    def _safe_datetime_conversion(self, series):
+        """Safely convert datetime with multiple format attempts"""
+        common_formats = [
+            '%Y-%m-%d %H:%M:%S',
+            '%Y/%m/%d %H:%M:%S',
+            '%d-%m-%Y %H:%M:%S',
+            '%m/%d/%Y %H:%M:%S'
+        ]
+        
+        for fmt in common_formats:
+            try:
+                return pd.to_datetime(series, format=fmt)
+            except ValueError:
+                continue
+        
+        # If no format works, try coercing
+        result = pd.to_datetime(series, errors='coerce')
+        null_count = result.isnull().sum()
+        if null_count > 0:
+            warnings.warn(f"Could not parse {null_count} datetime values")
+        return result
+
+    def _extract_datetime_features(self, df):
+        """Extract temporal features from TX_DATETIME with enhanced error handling"""
+        df = df.copy()
+        try:
+            df['TX_DATETIME'] = self._safe_datetime_conversion(df['TX_DATETIME'])
+        except Exception as e:
+            print(f"Error in datetime conversion: {str(e)}")
+            raise
+            
+        # Time-based features with null handling
+        df['hour'] = df['TX_DATETIME'].dt.hour
+        df['day_of_week'] = df['TX_DATETIME'].dt.dayofweek
+        df['month'] = df['TX_DATETIME'].dt.month
+        df['is_weekend'] = df['day_of_week'].isin([5, 6]).astype(int)
+        df['is_night'] = ((df['hour'] >= 23) | (df['hour'] <= 4)).astype(int)
+        df['is_rush_hour'] = (((df['hour'] >= 8) & (df['hour'] <= 10)) |
+                          ((df['hour'] >= 16) & (df['hour'] <= 18))).astype(int)
+        df['is_holiday'] = df['TX_DATETIME'].apply(
+            lambda x: x in self.us_holidays if pd.notnull(x) else False).astype(int)
+        
+        # Fill any remaining nulls with median
+        temporal_features = self.feature_groups['temporal']
+        for feature in temporal_features:
+            if df[feature].isnull().any():
+                df[feature] = df[feature].fillna(df[feature].median())
+            
+        return df
+
+    def _create_amount_features(self, df):
+        """Create amount-based features with improved handling of edge cases"""
+        df = df.copy()
+        
+        # Ensure positive amounts
+        df['TX_AMOUNT'] = df['TX_AMOUNT'].clip(lower=0)
+        df['amount_log'] = np.log1p(df['TX_AMOUNT'])
+        
+        # Customer amount statistics with careful null handling
+        amount_stats = df.groupby('CUSTOMER_ID')['TX_AMOUNT'].agg(
+            ['mean', 'std', 'max', 'min']
+        ).apply(lambda x: x.fillna(x.median()))
+        
+        # Handle zero std cases
+        min_std = amount_stats['std'].mean() * 0.01  # Use 1% of mean std as minimum
+        amount_stats['std'] = amount_stats['std'].replace(0, min_std)
+        
+        df = df.merge(amount_stats, on='CUSTOMER_ID', how='left')
+        
+        # Calculate amount deviation with safe division
+        df['amount_deviation'] = abs(df['TX_AMOUNT'] - df['mean']) / df['std'].clip(lower=min_std)
+        
+        # Fill any remaining nulls with median
+        amount_features = self.feature_groups['amount']
+        for feature in amount_features:
+            if df[feature].isnull().any():
+                df[feature] = df[feature].fillna(df[feature].median())
+        
+        return df
+
+    def _create_customer_features(self, df):
+        """Create customer-related features with null handling"""
+        df = df.copy()
+        
+        # Transaction counts with null handling
+        customer_stats = df.groupby('CUSTOMER_ID').agg({
+            'TX_DATETIME': 'count',
+            'TERMINAL_ID': 'nunique',
+            'hour': ['mean', 'std']
+        }).apply(lambda x: x.fillna(x.median()))
+        
+        customer_stats.columns = [
+            'customer_tx_count', 'customer_terminal_count',
+            'customer_hour_mean', 'customer_hour_std'
+        ]
+        
+        df = df.merge(customer_stats, on='CUSTOMER_ID', how='left')
+        
+        # Fill any remaining nulls with median
+        customer_features = self.feature_groups['customer']
+        for feature in customer_features:
+            if df[feature].isnull().any():
+                df[feature] = df[feature].fillna(df[feature].median())
+        
+        return df
+
+    def _create_terminal_features(self, df):
+        """Create terminal-related features with improved handling"""
+        df = df.copy()
+        
+        # Terminal transaction statistics with careful null handling
+        terminal_stats = df.groupby('TERMINAL_ID').agg({
+            'TX_AMOUNT': ['count', 'mean', 'std', 'median'],
+            'TX_DATETIME': lambda x: x.diff().mean().total_seconds() if len(x) > 1 else 0
+        }).apply(lambda x: x.fillna(x.median()))
+        
+        terminal_stats.columns = [
+            'terminal_tx_count', 'terminal_amount_mean',
+            'terminal_amount_std', 'terminal_amount_median',
+            'terminal_tx_time_mean'
+        ]
+        
+        # Additional terminal features
+        terminal_stats['terminal_tx_count_large'] = df.groupby('TERMINAL_ID')['TX_AMOUNT'].apply(
+            lambda x: (x > x.mean()).sum()
+        ).fillna(0)
+        
+        terminal_stats['terminal_tx_time_std'] = df.groupby('TERMINAL_ID')['TX_DATETIME'].apply(
+            lambda x: x.diff().std().total_seconds() if len(x) > 1 else 0
+        ).fillna(0)
+        
+        # Terminal fraud rate with Laplace smoothing
+        if 'TX_FRAUD' in df.columns:
+            terminal_fraud = df.groupby('TERMINAL_ID')['TX_FRAUD'].agg(['mean', 'sum']).fillna(0)
+            terminal_stats['terminal_fraud_rate_smoothed'] = (
+                terminal_fraud['sum'] + 0.01
+            ) / (terminal_stats['terminal_tx_count'] + 0.02)
+        else:
+            terminal_stats['terminal_fraud_rate_smoothed'] = 0
+        
+        df = df.merge(terminal_stats, on='TERMINAL_ID', how='left')
+        
+        # Fill any remaining nulls with median
+        terminal_features = self.feature_groups['terminals']
+        for feature in terminal_features:
+            if df[feature].isnull().any():
+                df[feature] = df[feature].fillna(df[feature].median())
+        
+        return df
+
+    def _safe_sequence_features(self, df):
+        """Memory-efficient sequence feature creation with improved handling"""
+        df = df.copy()
+        df = df.sort_values(['CUSTOMER_ID', 'TX_DATETIME'])
+        
+        # Pre-allocate arrays for results
+        sequence_features = {
+            'time_since_last': np.nan,
+            'time_until_next': np.nan,
+            'amount_diff_last': np.nan,
+            'amount_diff_next': np.nan,
+            'terminal_changed': 1,  # Default to 1 for first transaction
+            'repeated_terminal': 0,
+            'tx_velocity_1h': 0,
+            'tx_velocity_24h': 0,
+            'amount_velocity_1h': 0,
+            'amount_velocity_24h': 0,
+            'unique_terminals_24h': 0
+        }
+        
+        for feature, default in sequence_features.items():
+            df[feature] = default
+        
+        # Process in chunks for memory efficiency
+        chunk_size = 10000
+        for start_idx in range(0, len(df), chunk_size):
+            end_idx = min(start_idx + chunk_size, len(df))
+            chunk = df.iloc[start_idx:end_idx]
+            
+            # Calculate basic sequence features
+            group = chunk.groupby('CUSTOMER_ID')
+            df.loc[chunk.index, 'time_since_last'] = group['TX_DATETIME'].diff().dt.total_seconds()
+            df.loc[chunk.index, 'time_until_next'] = group['TX_DATETIME'].diff(-1).dt.total_seconds()
+            df.loc[chunk.index, 'amount_diff_last'] = group['TX_AMOUNT'].diff()
+            df.loc[chunk.index, 'amount_diff_next'] = group['TX_AMOUNT'].diff(-1)
+            
+            # Terminal changes
+            df.loc[chunk.index, 'terminal_changed'] = (
+                group['TERMINAL_ID'].shift() != chunk['TERMINAL_ID']
+            ).astype(int)
+            
+            # Calculate velocity features
+            for window in ['1h', '24h']:
+                td = pd.Timedelta(window)
+                for idx in chunk.index:
+                    current_time = df.loc[idx, 'TX_DATETIME']
+                    customer_mask = (
+                        (df['CUSTOMER_ID'] == df.loc[idx, 'CUSTOMER_ID']) &
+                        (df['TX_DATETIME'] <= current_time) &
+                        (df['TX_DATETIME'] > current_time - td)
+                    )
+                    
+                    df.loc[idx, f'tx_velocity_{window}'] = customer_mask.sum()
+                    df.loc[idx, f'amount_velocity_{window}'] = df.loc[customer_mask, 'TX_AMOUNT'].sum()
+                    
+                    if window == '24h':
+                        df.loc[idx, 'unique_terminals_24h'] = df.loc[customer_mask, 'TERMINAL_ID'].nunique()
+        
+        # Fill nulls with median for all sequence features
+        sequence_features = self.feature_groups['sequence']
+        for feature in sequence_features:
+            if df[feature].isnull().any():
+                df[feature] = df[feature].fillna(df[feature].median())
+        
+        return df
+
+    def _create_features(self, df):
+        """Create all features with improved error handling and progress tracking"""
+        df = df.copy()
+        
+        try:
+            print("Extracting datetime features...")
+            df = self._extract_datetime_features(df)
+            
+            print("Creating amount features...")
+            df = self._create_amount_features(df)
+            
+            print("Creating customer features...")
+            df = self._create_customer_features(df)
+            
+            print("Creating terminal features...")
+            df = self._create_terminal_features(df)
+            
+            print("Creating sequence features...")
+            df = self._safe_sequence_features(df)
+            
+            # Ensure all features exist and handle any remaining nulls
+            print("Validating features...")
+            all_features = self.get_feature_names()
+            missing = set(all_features) - set(df.columns)
+            if missing:
+                raise ValueError(f"Failed to create features: {missing}")
+            
+            # Final null check across all features
+            for feature in all_features:
+                if df[feature].isnull().any():
+                    print(f"Warning: Filling remaining nulls in {feature}")
+                    df[feature] = df[feature].fillna(df[feature].median())
+            
+        except Exception as e:
+            print(f"Error in feature creation: {str(e)}")
+            raise
+        
+        return df
+
+    def transform(self, df, training=True):
+        """Transform data with consistent feature handling and improved error checking"""
+        print("Starting feature transformation...")
+        df = df.copy()
+        
+        try:
+            # Create features
+            df = self._create_features(df)
+            
+            # Process each feature group
+            transformed_groups = {}
+            for group, features in self.feature_groups.items():
+                # Extract and order features
+                group_data = df[features].copy()
+                
+                # Impute missing values
+                if training:
+                    group_data = pd.DataFrame(
+                        self.imputers[group].fit_transform(group_data),
+                        columns=features
+                    )
+                else:
+                    group_data = pd.DataFrame(
+                        self.imputers[group].transform(group_data),
+                        columns=features
+                    )
+                
+                # Scale features
+                if training:
+                    transformed_groups[group] = self.scalers[group].fit_transform(group_data)
+                else:
+                    transformed_groups[group] = self.scalers[group].transform(group_data)
+            
+            if training:
+                # Combine features for SMOTE
+                X = np.concatenate([transformed_groups[group] for group in self.feature_groups.keys()], axis=1)
+                y = df['TX_FRAUD'].values
+                
+                print(f"\nTraining Data Class distribution before SMOTE:")
+                print(f"Non-fraud: {(y == 0).sum()}, Fraud: {(y == 1).sum()}")
+                
+                # Apply SMOTE with careful sampling
+                n_minority = (y == 1).sum()
+                n_majority = (y == 0).sum()
+                target_minority = int(n_majority * 0.15)  # 15% fraud ratio
+                
+                smote = SMOTE(
+                    sampling_strategy={1: min(target_minority, n_majority)},
+                    random_state=42,
+                    k_neighbors=min(5, n_minority - 1),
+                    n_jobs=1
+                )
+                
+                X_resampled, y_resampled = smote.fit_resample(X, y)
+                
+                print(f"\nTraining Data Class distribution after SMOTE:")
+                print(f"Non-fraud: {sum(y_resampled == 0)}, Fraud: {sum(y_resampled == 1)}")
+                
+                # Split back into feature groups
+                start_idx = 0
+                resampled_groups = {}
+                for group in self.feature_groups.keys():
+                    end_idx = start_idx + len(self.feature_groups[group])
+                    resampled_groups[group] = X_resampled[:, start_idx:end_idx]
+                    start_idx = end_idx
+                
+                return resampled_groups, y_resampled
+            
+            return transformed_groups
+            
+        except Exception as e:
+            print(f"Error in transform: {str(e)}")
+            raise
+
     def get_feature_names(self):
         """Return a list of all feature names across all feature groups"""
         all_features = []
@@ -75,313 +403,6 @@ class TransactionPreprocessor:
             }
         return metadata
 
-    def _extract_datetime_features(self, df):
-        """Extract temporal features from TX_DATETIME"""
-        df = df.copy()
-        try:
-            df['TX_DATETIME'] = pd.to_datetime(df['TX_DATETIME'])
-        except (ValueError, TypeError):
-            print("Warning: Error converting TX_DATETIME. Attempting to coerce...")
-            df['TX_DATETIME'] = pd.to_datetime(df['TX_DATETIME'], errors='coerce')
-            
-        # Time-based features
-        df['hour'] = df['TX_DATETIME'].dt.hour
-        df['day_of_week'] = df['TX_DATETIME'].dt.dayofweek
-        df['month'] = df['TX_DATETIME'].dt.month
-        df['is_weekend'] = df['day_of_week'].isin([5, 6]).astype(int)
-        df['is_night'] = ((df['hour'] >= 23) | (df['hour'] <= 4)).astype(int)
-        df['is_rush_hour'] = (((df['hour'] >= 8) & (df['hour'] <= 10)) |
-                          ((df['hour'] >= 16) & (df['hour'] <= 18))).astype(int)
-        df['is_holiday'] = df['TX_DATETIME'].apply(
-            lambda x: x in self.us_holidays if pd.notnull(x) else False).astype(int)
-            
-        return df
-
-    def _create_amount_features(self, df):
-        """Create amount-based features"""
-        df = df.copy()
-        df['TX_AMOUNT'] = df['TX_AMOUNT'].clip(lower=0)
-        df['amount_log'] = np.log1p(df['TX_AMOUNT'])
-        
-        # Customer amount statistics
-        amount_stats = df.groupby('CUSTOMER_ID')['TX_AMOUNT'].agg(
-            ['mean', 'std', 'max', 'min']
-        ).fillna(0)
-        
-        df = df.merge(amount_stats, on='CUSTOMER_ID', how='left')
-        
-        # Handle std=0 cases for amount_deviation
-        df['std'] = df['std'].replace(0, df['std'].mean())
-        df['amount_deviation'] = abs(df['TX_AMOUNT'] - df['mean']) / df['std']
-        
-        return df
-
-    def _create_customer_features(self, df):
-        """Create customer-related features"""
-        df = df.copy()
-        
-        # Transaction counts
-        customer_stats = df.groupby('CUSTOMER_ID').agg({
-            'TX_DATETIME': 'count',
-            'TERMINAL_ID': 'nunique',
-            'hour': ['mean', 'std']
-        }).apply(lambda x: x.fillna(x.median()))
-
-        
-        customer_stats.columns = [
-            'customer_tx_count', 'customer_terminal_count',
-            'customer_hour_mean', 'customer_hour_std'
-        ]
-        
-        df = df.merge(customer_stats, on='CUSTOMER_ID', how='left')
-        return df
-
-    def _create_terminal_features(self, df):
-        """Create terminal-related features"""
-        df = df.copy()
-        
-        # Terminal transaction statistics
-        terminal_stats = df.groupby('TERMINAL_ID').agg({
-            'TX_AMOUNT': ['count', 'mean', 'std', 'median'],
-            'TX_DATETIME': lambda x: x.diff().mean().total_seconds() if len(x) > 1 else 0
-        })
-        
-        # Fill missing values with the median of each column
-        terminal_stats = terminal_stats.apply(lambda x: x.fillna(x.median()))
-        
-        terminal_stats.columns = [
-            'terminal_tx_count', 'terminal_amount_mean',
-            'terminal_amount_std', 'terminal_amount_median',
-            'terminal_tx_time_mean'
-        ]
-        
-        # Additional terminal features
-        terminal_stats['terminal_tx_count_large'] = df.groupby('TERMINAL_ID')['TX_AMOUNT'].apply(
-            lambda x: (x > x.mean()).sum()
-        ).apply(lambda x: x.fillna(x.median()))
-        
-        terminal_stats['terminal_tx_time_std'] = df.groupby('TERMINAL_ID')['TX_DATETIME'].apply(
-            lambda x: x.diff().std().total_seconds() if len(x) > 1 else 0
-        ).apply(lambda x: x.fillna(x.median()))
-        
-        # Terminal fraud rate with Laplace smoothing
-        if 'TX_FRAUD' in df.columns:
-            terminal_fraud = df.groupby('TERMINAL_ID')['TX_FRAUD'].agg(['mean', 'sum']).apply(lambda x: x.fillna(x.median()))
-            terminal_stats['terminal_fraud_rate_smoothed'] = (
-                terminal_fraud['sum'] + 0.01
-            ) / (terminal_stats['terminal_tx_count'] + 0.02)
-        else:
-            terminal_stats['terminal_fraud_rate_smoothed'] = 0
-        
-        df = df.merge(terminal_stats, on='TERMINAL_ID', how='left')
-        return df
-        
-    def _create_sequence_features(self, df):
-        """Create sequence-related features"""
-        df = df.copy()
-        df = df.sort_values(['CUSTOMER_ID', 'TX_DATETIME'])
-        
-        # Time-based sequence features
-        df['time_since_last'] = df.groupby('CUSTOMER_ID')['TX_DATETIME'].diff().dt.total_seconds().apply(lambda x: x.fillna(x.median()))
-
-        df['time_until_next'] = df.groupby('CUSTOMER_ID')['TX_DATETIME'].diff(-1).dt.total_seconds().apply(lambda x: x.fillna(x.median()))
-        
-        # Amount sequence features
-        df['amount_diff_last'] = df.groupby('CUSTOMER_ID')['TX_AMOUNT'].diff().apply(lambda x: x.fillna(x.median()))
-        df['amount_diff_next'] = df.groupby('CUSTOMER_ID')['TX_AMOUNT'].diff(-1).apply(lambda x: x.fillna(x.median()))
-        
-        # Terminal sequence features
-        df['terminal_changed'] = (
-            df.groupby('CUSTOMER_ID')['TERMINAL_ID'].shift() != df['TERMINAL_ID']
-        ).astype(int).fillna(1)
-        df['repeated_terminal'] = df.groupby(['CUSTOMER_ID', 'TERMINAL_ID']).cumcount()
-        
-        # Velocity features
-        for window in ['1h', '24h']:
-            td = pd.Timedelta(window)
-            
-            # Initialize velocity columns
-            df[f'tx_velocity_{window}'] = 0
-            df[f'amount_velocity_{window}'] = 0
-            if window == '24h':
-                df['unique_terminals_24h'] = 0
-            
-            for customer_id in df['CUSTOMER_ID'].unique():
-                mask = df['CUSTOMER_ID'] == customer_id
-                customer_data = df[mask].copy()
-                
-                # Calculate rolling counts and amounts
-                for idx in customer_data.index:
-                    time = customer_data.loc[idx, 'TX_DATETIME']
-                    window_mask = (
-                        (customer_data['TX_DATETIME'] <= time) & 
-                        (customer_data['TX_DATETIME'] > time - td)
-                    )
-                    
-                    df.loc[idx, f'tx_velocity_{window}'] = window_mask.sum()
-                    df.loc[idx, f'amount_velocity_{window}'] = customer_data.loc[window_mask, 'TX_AMOUNT'].sum()
-                    
-                    if window == '24h':
-                        df.loc[idx, 'unique_terminals_24h'] = customer_data.loc[window_mask, 'TERMINAL_ID'].nunique()
-        
-        return df
-
-    def _create_features(self, df):
-        """Create all features in consistent order"""
-        df = df.copy()
-        
-        # Create features with progress tracking
-        print("Extracting datetime features...")
-        df = self._extract_datetime_features(df)
-        
-        print("Creating amount features...")
-        df = self._create_amount_features(df)
-        
-        print("Creating customer features...")
-        df = self._create_customer_features(df)
-        
-        print("Creating terminal features...")
-        df = self._create_terminal_features(df)
-        
-        print("Creating sequence features...")
-        df = self._create_sequence_features(df)
-        
-        # Ensure all features exist with correct ordering
-        print("Validating features...")
-        for group, features in self.feature_groups.items():
-            missing_features = set(features) - set(df.columns)
-            if missing_features:
-                print(f"Warning: Creating missing features for group {group}: {missing_features}")
-            for feature in missing_features:
-                df[feature] = 0
-        
-        # Verify all required features exist
-        all_features = self.get_feature_names()
-        missing = set(all_features) - set(df.columns)
-        if missing:
-            raise ValueError(f"Failed to create features: {missing}")
-        
-        return df
-
-    def generate_feature_report(self, df):
-        """Generate a comprehensive report on feature statistics and quality"""
-        # Create features first
-        df = self._create_features(df)
-        
-        report = {
-            'feature_counts': {group: len(features) for group, features in self.feature_groups.items()},
-            'missing_values': {},
-            'unique_counts': {},
-            'value_ranges': {},
-            'correlations': {}
-        }
-        
-        # Calculate statistics for each feature group
-        for group, features in self.feature_groups.items():
-            group_data = df[features].copy()
-            
-            # Missing values analysis
-            missing_stats = group_data.isnull().sum()
-            report['missing_values'][group] = missing_stats[missing_stats > 0].to_dict()
-            
-            # Unique values analysis
-            report['unique_counts'][group] = group_data.nunique().to_dict()
-            
-            # Value ranges
-            report['value_ranges'][group] = {
-                feature: {
-                    'min': float(group_data[feature].min()),
-                    'max': float(group_data[feature].max()),
-                    'mean': float(group_data[feature].mean()),
-                    'std': float(group_data[feature].std())
-                } for feature in features
-            }
-            
-            # Correlation analysis within group
-            if len(features) > 1:
-                corr_matrix = group_data.corr()
-                high_corr = np.where(np.abs(corr_matrix) > 0.8)
-                high_corr_pairs = []
-                for i, j in zip(*high_corr):
-                    if i != j and corr_matrix.index[i] < corr_matrix.columns[j]:
-                        high_corr_pairs.append({
-                            'feature1': corr_matrix.index[i],
-                            'feature2': corr_matrix.columns[j],
-                            'correlation': float(corr_matrix.iloc[i, j])
-                        })
-                report['correlations'][group] = high_corr_pairs
-        
-        return report
-
-    def transform(self, df, training=True):
-        """Transform data with consistent feature handling"""
-        print("Starting feature transformation...")
-        df = df.copy()
-        
-        # Create all features
-        df = self._create_features(df)
-        
-        # Process each feature group
-        transformed_groups = {}
-        for group, features in self.feature_groups.items():
-            # Extract and order features
-            group_data = df[features].copy()
-            
-            # Impute missing values
-            if training:
-                group_data = pd.DataFrame(
-                    self.imputers[group].fit_transform(group_data),
-                    columns=features
-                )
-            else:
-                group_data = pd.DataFrame(
-                    self.imputers[group].transform(group_data),
-                    columns=features
-                )
-            
-            # Scale features
-            if training:
-                transformed_groups[group] = self.scalers[group].fit_transform(group_data)
-            else:
-                transformed_groups[group] = self.scalers[group].transform(group_data)
-        
-        if training:
-            # Combine features for SMOTE
-            X = np.concatenate([transformed_groups[group] for group in self.feature_groups.keys()], axis=1)
-            y = df['TX_FRAUD'].values
-            
-            # Apply SMOTE with careful sampling
-            n_minority = (y == 1).sum()
-            n_majority = (y == 0).sum()
-            target_minority = int(n_majority * 0.15)  # 15% fraud ratio
-            
-            print(f"\nTraining Data Class distribution before SMOTE:")
-            print(f"Non-fraud: {n_majority}, Fraud: {n_minority}")
-            
-            smote = SMOTE(
-                sampling_strategy={1: min(target_minority, n_majority)},
-                random_state=42,
-                k_neighbors=min(5, n_minority - 1),
-                n_jobs=1
-            )
-            
-            X_resampled, y_resampled = smote.fit_resample(X, y)
-            
-            print(f"\nTraining Data Class distribution after SMOTE:")
-            print(f"Non-fraud: {sum(y_resampled == 0)}, Fraud: {sum(y_resampled == 1)}")
-            
-            # Split back into feature groups
-            start_idx = 0
-            resampled_groups = {}
-            for group in self.feature_groups.keys():
-                end_idx = start_idx + len(self.feature_groups[group])
-                resampled_groups[group] = X_resampled[:, start_idx:end_idx]
-                start_idx = end_idx
-            
-            return resampled_groups, y_resampled
-        
-        return transformed_groups
-    
     def validate_features(self, df):
         """Validate features and return any issues found"""
         issues = []
@@ -396,7 +417,7 @@ class TransactionPreprocessor:
         if 'TX_DATETIME' in df.columns:
             if not pd.api.types.is_datetime64_any_dtype(df['TX_DATETIME']):
                 try:
-                    pd.to_datetime(df['TX_DATETIME'])
+                    self._safe_datetime_conversion(df['TX_DATETIME'])
                 except:
                     issues.append("TX_DATETIME cannot be converted to datetime format")
         
@@ -426,26 +447,3 @@ class TransactionPreprocessor:
             issues.append("TX_FRAUD contains values other than 0 and 1")
         
         return issues
-
-    def save_preprocessor(self, filepath):
-        """Save the preprocessor state to a file"""
-        save_dict = {
-            'scalers': self.scalers,
-            'imputers': self.imputers,
-            'feature_groups': self.feature_groups
-        }
-        with open(filepath, 'wb') as f:
-            pkl.dump(save_dict, f)
-    
-    @classmethod
-    def load_preprocessor(cls, filepath):
-        """Load a preprocessor state from a file"""
-        with open(filepath, 'rb') as f:
-            save_dict = pkl.load(f)
-        
-        preprocessor = cls()
-        preprocessor.scalers = save_dict['scalers']
-        preprocessor.imputers = save_dict['imputers']
-        preprocessor.feature_groups = save_dict['feature_groups']
-        
-        return preprocessor

@@ -509,10 +509,6 @@ def train_fraud_detection_system(raw_data, test_size=0.25):
                         (raw_data['TX_DATETIME'] <= val_end_date)]
     test_data = raw_data[raw_data['TX_DATETIME'] > test_start_date]
     
-    # Generate feature report
-    print("\nGenerating feature report...")
-    feature_report = preprocessor.generate_feature_report(train_data)
-    
     # Process data for each split
     print("\nProcessing training data...")
     feature_groups_train, y_train_resampled = preprocessor.transform(train_data, training=True)
@@ -559,7 +555,6 @@ def train_fraud_detection_system(raw_data, test_size=0.25):
         # Log dataset info and feature metadata
         mlflow.log_params(data_stats)
         mlflow.log_dict(feature_metadata, 'feature_metadata.json')
-        mlflow.log_dict(feature_report, 'feature_report.json')
         
         # Train ensemble with validation monitoring
         print("\nTraining ensemble...")
@@ -590,9 +585,6 @@ def train_fraud_detection_system(raw_data, test_size=0.25):
         # Create and log summary report
         create_summary_report(data_stats, metrics, feature_metadata)
         
-        # Save preprocessor state
-        preprocessor.save_preprocessor('preprocessor_state.pkl')
-        mlflow.log_artifact('preprocessor_state.pkl')
         
         print("\nTraining completed successfully!")
         print(f"MLflow run ID: {run.info.run_id}")
@@ -726,7 +718,7 @@ for filename in os.listdir(directory):
 
 # Concatenate all DataFrames into a single DataFrame
 combined_df = pd.concat(df_list, ignore_index=True)
-pos_df = combined_df[combined_df['TX_FRAUD'] == 1].iloc[:30]
+pos_df = combined_df[combined_df['TX_FRAUD'] == 1].iloc[:20]
 neg_df = combined_df[combined_df['TX_FRAUD'] == 0].iloc[:500]
 df2 = pd.concat([pos_df, neg_df], ignore_index=True, axis= 0)
-preprocessor, ensemble, metrics = train_fraud_detection_system(combined_df)
+preprocessor, ensemble, metrics = train_fraud_detection_system(df2)
