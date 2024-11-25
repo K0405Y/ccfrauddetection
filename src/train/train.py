@@ -19,6 +19,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import warnings
 import pickle as pkl
+import itertools
 from scipy.optimize import minimize
 warnings.filterwarnings("ignore")
 
@@ -48,7 +49,6 @@ class FraudDetectionNN(nn.Module):
         logits = self.model(x)
         return nn.functional.softmax(logits, dim=1)
 
-
 class FraudDetectionNNWrapper(mlflow.pyfunc.PythonModel):
     def __init__(self, model):
         self.model = model
@@ -70,57 +70,58 @@ class FraudDetectionNNWrapper(mlflow.pyfunc.PythonModel):
             
 class FraudDetectionEnsemble:
     def __init__(self, input_dim, feature_names=None, weights=[0.4, 0.3, 0.3]):
+        # Original initialization
         self.input_dim = input_dim
         self.feature_names = feature_names or [f'feature_{i}' for i in range(input_dim)]
         self.weights = weights
-
-        # Increase class weight for minority class
+        
+        # Initialize class weights based on original distribution
         weight_ratio = (1/0.026)  # Based on original class distribution
         self.class_weights = {0: 1, 1: weight_ratio}
-
-        # Modified XGBoost with better parameters for imbalanced data
-        self.xgb_model = xgb.XGBClassifier(
-            max_depth=4,  # Reduced to prevent overfitting
-            learning_rate=0.01,  # Slower learning rate
-            n_estimators=500,  # More trees
-            min_child_weight=10,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            gamma=1,
-            reg_alpha=1,
-            reg_lambda=2,
-            # eval_metric=['auc', 'aucpr'],  # Added PR-AUC metric
-            use_label_encoder=False,
-            objective='binary:logistic',
-            scale_pos_weight=weight_ratio,
-            tree_method='hist'  # Faster training
-        )
         
-        # Modified Random Forest with better parameters for imbalanced data
-        self.rf_model = RandomForestClassifier(
-            n_estimators=300,
-            max_depth=6,
-            min_samples_leaf=4,
-            min_samples_split=10,
-            random_state=42,
-            class_weight='balanced_subsample',
-            bootstrap=True,
-            oob_score=True,
-            n_jobs=-1  # Use all cores
-        )
-        
-        self.nn_model = FraudDetectionNN(input_dim)
-        
-        # Initialize thresholds with focus on recall
+        # Initialize thresholds
         self.thresholds = {
             'xgboost': 0.3,
             'random_forest': 0.3,
             'neural_network': 0.3,
             'ensemble': 0.3
         }
+        
+        # Parameter spaces for tuning
+        self.param_space = {
+            'xgboost': {
+                'max_depth': [3, 4, 5],
+                'learning_rate': [0.01, 0.05],
+                'n_estimators': [300, 500],
+                'min_child_weight': [5, 10],
+                'subsample': [0.7, 0.8],
+                'colsample_bytree': [0.7, 0.8],
+                'gamma': [0.5, 1],
+                'reg_alpha': [0.5, 1],
+                'reg_lambda': [1, 2],
+                'scale_pos_weight': [weight_ratio] 
+            },
+            'random_forest': {
+                'n_estimators': [200, 300],
+                'max_depth': [4, 6],
+                'min_samples_leaf': [2, 4],
+                'min_samples_split': [5, 10]
+            },
+            'neural_network': {
+                'learning_rate': [0.0005, 0.001],
+                'dropout_rates': [(0.4, 0.3, 0.2), (0.5, 0.4, 0.3)],
+                'hidden_layers': [(64, 32, 16), (32, 16, 8)],
+                'weight_decay': [1e-5, 1e-4]
+            }
+        }
+        
+        # Initialize models with default parameters
+        self.xgb_model = None
+        self.rf_model = None
+        self.nn_model = None
 
     def _optimize_threshold(self, y_true, y_prob, metric='f1', threshold_range=None):
-        """Enhanced threshold optimization with focus on fraud detection"""
+        """Original threshold optimization logic"""
         if threshold_range is None:
             threshold_range = np.linspace(0.1, 0.9, 100)
         
@@ -140,8 +141,6 @@ class FraudDetectionEnsemble:
                 prec = precision_score(y_true, y_pred)
                 rec = recall_score(y_true, y_pred)
                 score = 2 * (prec * rec) / (prec + rec) if (prec + rec) > 0 else 0
-            else:
-                raise ValueError(f"Unsupported metric: {metric}")
             
             if score > best_score:
                 best_score = score
@@ -149,222 +148,8 @@ class FraudDetectionEnsemble:
         
         return best_threshold, best_score
 
-    def _train_xgboost(self, X_train, y_train, X_val, y_val):
-        """Enhanced XGBoost training with early stopping and custom eval metric"""
-        print("\nTraining XGBoost model...")
-        
-        self.xgb_model.set_params(eval_metric='aucpr')
-
-        # Train with early stopping
-        self.xgb_model.fit(
-            X_train, y_train,
-            eval_set=[(X_train, y_train), (X_val, y_val)],
-            early_stopping_rounds=30,
-            verbose=100
-        )
-        
-        # Get validation predictions with optimal threshold
-        val_probs = self.xgb_model.predict_proba(X_val)[:, 1]
-        optimal_threshold, _ = self._optimize_threshold(y_val, val_probs, metric='f1')
-        val_preds = (val_probs >= optimal_threshold).astype(int)
-        
-        metrics = {
-            'xgboost_val_auc': roc_auc_score(y_val, val_probs),
-            'xgboost_val_accuracy': accuracy_score(y_val, val_preds),
-            'xgboost_val_precision': precision_score(y_val, val_preds),
-            'xgboost_val_recall': recall_score(y_val, val_preds),
-            'xgboost_val_f1': f1_score(y_val, val_preds),
-            'xgboost_threshold': optimal_threshold
-        }
-        
-        return metrics, self.xgb_model.feature_importances_
-
-    def _train_random_forest(self, X_train, y_train, X_val, y_val):
-        """Enhanced Random Forest training with optimal threshold search"""
-        print("\nTraining Random Forest model...")
-        
-        # Train the model
-        self.rf_model.fit(X_train, y_train)
-        
-        # Get validation predictions with optimal threshold
-        val_probs = self.rf_model.predict_proba(X_val)[:, 1]
-        optimal_threshold, _ = self._optimize_threshold(y_val, val_probs, metric='recall')
-        val_preds = (val_probs >= optimal_threshold).astype(int)
-        
-        metrics = {
-            'random_forest_val_auc': roc_auc_score(y_val, val_probs),
-            'random_forest_val_accuracy': accuracy_score(y_val, val_preds),
-            'random_forest_val_precision': precision_score(y_val, val_preds),
-            'random_forest_val_recall': recall_score(y_val, val_preds),
-            'random_forest_val_f1': f1_score(y_val, val_preds),
-            'random_forest_oob_score': self.rf_model.oob_score_,
-            'random_forest_threshold': optimal_threshold
-        }
-        
-        return metrics, self.rf_model.feature_importances_
-
-    def _train_neural_network(self, X_train, y_train, X_val, y_val):
-        """Enhanced Neural Network training with improved batch handling and monitoring"""
-        print("\nTraining Neural Network model...")
-        
-        # Convert data to tensors
-        X_train_tensor = torch.FloatTensor(X_train)
-        y_train_tensor = torch.LongTensor(y_train)
-        X_val_tensor = torch.FloatTensor(X_val)
-        
-        # Define training parameters with adjusted batch size
-        criterion = nn.CrossEntropyLoss(weight=torch.FloatTensor([1, self.class_weights[1]]))
-        optimizer = torch.optim.Adam(self.nn_model.parameters(), lr=0.001, weight_decay=1e-5)
-        
-        # Adjust batch size based on dataset size
-        batch_size = min(32, len(X_train) // 10)  # Ensure at least 10 batches
-        batch_size = max(batch_size, 4)  # Ensure batch size is at least 4
-        
-        n_epochs = 100
-        best_val_auc = 0
-        patience = 10
-        patience_counter = 0
-        
-        # Create data loaders with adjusted batch size
-        train_dataset = torch.utils.data.TensorDataset(X_train_tensor, y_train_tensor)
-        train_loader = torch.utils.data.DataLoader(
-            train_dataset,
-            batch_size=batch_size,
-            shuffle=True,
-            drop_last=True  # Drop last batch if incomplete
-        )
-        
-        # Training loop with improved monitoring
-        for epoch in range(n_epochs):
-            self.nn_model.train()
-            total_loss = 0
-            batch_count = 0
-            
-            for X_batch, y_batch in train_loader:
-                if len(X_batch) < 2:  # Skip batches that are too small
-                    continue
-                    
-                optimizer.zero_grad()
-                output = self.nn_model(X_batch)
-                loss = criterion(output, y_batch)
-                loss.backward()
-                
-                # Gradient clipping to prevent exploding gradients
-                torch.nn.utils.clip_grad_norm_(self.nn_model.parameters(), max_norm=1.0)
-                
-                optimizer.step()
-                total_loss += loss.item()
-                batch_count += 1
-            
-            avg_loss = total_loss / batch_count if batch_count > 0 else float('inf')
-            
-            # Validation
-            self.nn_model.eval()
-            with torch.no_grad():
-                val_output = self.nn_model(X_val_tensor)
-                val_probs = val_output.numpy()[:, 1]
-                optimal_threshold, _ = self._optimize_threshold(y_val, val_probs, metric='recall')
-                val_preds = (val_probs >= optimal_threshold).astype(int)
-                val_auc = roc_auc_score(y_val, val_probs)
-                val_f1 = f1_score(y_val, val_preds)
-            
-            # Early stopping with improved criteria
-            if val_auc > best_val_auc:
-                best_val_auc = val_auc
-                patience_counter = 0
-                best_state = self.nn_model.state_dict()
-            else:
-                patience_counter += 1
-            
-            if patience_counter >= patience:
-                print(f"Early stopping at epoch {epoch}")
-                break
-            
-            if (epoch + 1) % 10 == 0:
-                print(f"Epoch {epoch + 1}/{n_epochs}, Loss: {avg_loss:.4f}, "
-                      f"Val AUC: {val_auc:.4f}, Val F1: {val_f1:.4f}")
-        
-        # Restore best model
-        self.nn_model.load_state_dict(best_state)
-        
-        # Final validation metrics
-        self.nn_model.eval()
-        with torch.no_grad():
-            val_output = self.nn_model(X_val_tensor)
-            val_probs = val_output.numpy()[:, 1]
-            val_preds = (val_probs >= optimal_threshold).astype(int)
-        
-        metrics = {
-            'neural_network_val_auc': roc_auc_score(y_val, val_probs),
-            'neural_network_val_accuracy': accuracy_score(y_val, val_preds),
-            'neural_network_val_precision': precision_score(y_val, val_preds),
-            'neural_network_val_recall': recall_score(y_val, val_preds),
-            'neural_network_val_f1': f1_score(y_val, val_preds),
-            'neural_network_threshold': optimal_threshold
-        }
-        
-        # Feature importance using integrated gradients
-        ig = IntegratedGradients(self.nn_model)
-        attributions = ig.attribute(X_val_tensor, target=1)
-        importance = attributions.mean(dim=0).abs().numpy()
-        
-        return metrics, importance
-
-    def _optimize_weights(self, X_val, y_val):
-        """Enhanced ensemble weight optimization with focus on fraud detection"""
-        print("\nOptimizing ensemble weights...")
-        
-        # Get predictions from each model
-        xgb_probs = self.xgb_model.predict_proba(X_val)[:, 1]
-        rf_probs = self.rf_model.predict_proba(X_val)[:, 1]
-        nn_probs = self.nn_model(torch.FloatTensor(X_val)).detach().numpy()[:, 1]
-        
-        def objective(weights):
-            # Normalize weights
-            weights = np.array(weights)
-            weights = weights / weights.sum()
-            
-            # Calculate weighted probabilities
-            ensemble_probs = (
-                weights[0] * xgb_probs +
-                weights[1] * rf_probs +
-                weights[2] * nn_probs
-            )
-            
-            # Use optimal threshold
-            optimal_threshold, _ = self._optimize_threshold(y_val, ensemble_probs, metric='f1')
-            ensemble_preds = (ensemble_probs >= optimal_threshold).astype(int)
-            
-            # Optimize for both AUC and recall
-            auc_score = roc_auc_score(y_val, ensemble_probs)
-            recall = recall_score(y_val, ensemble_preds)
-            f1 = f1_score(y_val, ensemble_preds)
-            
-            # Combined score with emphasis on recall
-            return -(0.4 * auc_score + 0.3 * recall + 0.3 * f1)
-        
-        # Optimize weights
-        initial_weights = np.array(self.weights)
-        bounds = [(0, 1)] * 3
-        constraints = {'type': 'eq', 'fun': lambda w: np.sum(w) - 1}
-        
-        result = minimize(
-            objective,
-            initial_weights,
-            bounds=bounds,
-            constraints=constraints,
-            method='SLSQP'
-        )
-        
-        # Update weights
-        self.weights = list(result.x / result.x.sum())
-        print(f"Optimized weights: XGBoost={self.weights[0]:.3f}, "
-              f"RF={self.weights[1]:.3f}, NN={self.weights[2]:.3f}")
-        
-        return self.weights
-
     def _optimize_model_thresholds(self, X_val, y_val, metric='f1'):
-        """Enhanced threshold optimization for all models"""
+        """Optimize classification thresholds for all models"""
         print("\nOptimizing classification thresholds...")
         
         # Get predictions from each model
@@ -394,60 +179,433 @@ class FraudDetectionEnsemble:
         print(f"Ensemble: {self.thresholds['ensemble']:.3f} (score: {ensemble_score:.3f})")
         
         return self.thresholds
+    
+    def _optimize_weights(self, X_val, y_val):
+        """Original weight optimization logic"""
+        print("\nOptimizing ensemble weights...")
+        
+        # Get predictions from each model
+        xgb_probs = self.xgb_model.predict_proba(X_val)[:, 1]
+        rf_probs = self.rf_model.predict_proba(X_val)[:, 1]
+        nn_probs = self.nn_model(torch.FloatTensor(X_val)).detach().numpy()[:, 1]
+        
+        def objective(weights):
+            # Normalize weights
+            weights = np.array(weights)
+            weights = weights / weights.sum()
+            
+            # Calculate weighted probabilities
+            ensemble_probs = (
+                weights[0] * xgb_probs +
+                weights[1] * rf_probs +
+                weights[2] * nn_probs
+            )
+            
+            # Optimize for both AUC and recall
+            auc_score = roc_auc_score(y_val, ensemble_probs)
+            optimal_threshold, _ = self._optimize_threshold(y_val, ensemble_probs, 'f1')
+            ensemble_preds = (ensemble_probs >= optimal_threshold).astype(int)
+            recall = recall_score(y_val, ensemble_preds)
+            f1 = f1_score(y_val, ensemble_preds)
+            
+            # Combined score with emphasis on recall
+            return -(0.4 * auc_score + 0.3 * recall + 0.3 * f1)
+        
+        # Optimize weights
+        initial_weights = np.array(self.weights)
+        bounds = [(0, 1)] * 3
+        constraints = {'type': 'eq', 'fun': lambda w: np.sum(w) - 1}
+        
+        result = minimize(
+            objective,
+            initial_weights,
+            bounds=bounds,
+            constraints=constraints,
+            method='SLSQP'
+        )
+        
+        # Update weights
+        self.weights = list(result.x / result.x.sum())
+        mlflow.log_params({
+            'xgboost_weight': self.weights[0],
+            'rf_weight': self.weights[1],
+            'nn_weight': self.weights[2]
+        })
+        
+        print(f"Optimized weights: XGBoost={self.weights[0]:.3f}, "
+              f"RF={self.weights[1]:.3f}, NN={self.weights[2]:.3f}")
+        
+        return self.weights
+
+    def _tune_xgboost(self, X_train, y_train, X_val, y_val):
+        """Tune XGBoost with MLFlow tracking"""
+        print("\nTuning XGBoost hyperparameters...")
+        
+        with mlflow.start_run(nested=True, run_name="xgboost_tuning"):
+            best_score = -float('inf')
+            best_params = None
+            best_threshold = 0.3
+            
+            tscv = TimeSeriesSplit(n_splits=3)
+            
+            for params in self._generate_param_combinations('xgboost'):
+                cv_scores = []
+                cv_thresholds = []
+                
+                for train_idx, val_idx in tscv.split(X_train):
+                    X_cv_train, X_cv_val = X_train[train_idx], X_train[val_idx]
+                    y_cv_train, y_cv_val = y_train[train_idx], y_train[val_idx]
+                    
+                    model = xgb.XGBClassifier(
+                        **params,
+                        tree_method='hist',
+                        eval_metric=['auc', 'aucpr']
+                    )
+                    
+                    model.fit(
+                        X_cv_train, y_cv_train,
+                        eval_set=[(X_cv_val, y_cv_val)],
+                        early_stopping_rounds=30,
+                        verbose=False
+                    )
+                    
+                    y_pred_proba = model.predict_proba(X_cv_val)[:, 1]
+                    threshold, score = self._optimize_threshold(y_cv_val, y_pred_proba, 'f1')
+                    
+                    cv_scores.append(score)
+                    cv_thresholds.append(threshold)
+                
+                mean_score = np.mean(cv_scores)
+                mean_threshold = np.mean(cv_thresholds)
+                
+                mlflow.log_metrics({
+                    'xgb_cv_score': mean_score,
+                    'xgb_cv_threshold': mean_threshold
+                })
+                
+                if mean_score > best_score:
+                    best_score = mean_score
+                    best_params = params
+                    best_threshold = mean_threshold
+            
+            mlflow.log_params({f"xgb_{k}": v for k, v in best_params.items()})
+            self.thresholds['xgboost'] = best_threshold
+            
+            # Initialize final model with best parameters
+            self.xgb_model = xgb.XGBClassifier(**best_params, tree_method='hist')
+            
+            return best_params
+
+    def _tune_random_forest(self, X_train, y_train, X_val, y_val):
+        """Tune Random Forest with MLFlow tracking"""
+        print("\nTuning Random Forest hyperparameters...")
+        
+        with mlflow.start_run(nested=True, run_name="random_forest_tuning"):
+            best_score = -float('inf')
+            best_params = None
+            best_threshold = 0.3
+            
+            tscv = TimeSeriesSplit(n_splits=3)
+            
+            for params in self._generate_param_combinations('random_forest'):
+                cv_scores = []
+                cv_thresholds = []
+                
+                for train_idx, val_idx in tscv.split(X_train):
+                    X_cv_train, X_cv_val = X_train[train_idx], X_train[val_idx]
+                    y_cv_train, y_cv_val = y_train[train_idx], y_train[val_idx]
+                    
+                    model = RandomForestClassifier(
+                        **params,
+                        class_weight='balanced_subsample',
+                        n_jobs=-1,
+                        random_state=42
+                    )
+                    
+                    model.fit(X_cv_train, y_cv_train)
+                    y_pred_proba = model.predict_proba(X_cv_val)[:, 1]
+                    threshold, score = self._optimize_threshold(y_cv_val, y_pred_proba, 'recall')
+                    
+                    cv_scores.append(score)
+                    cv_thresholds.append(threshold)
+                
+                mean_score = np.mean(cv_scores)
+                mean_threshold = np.mean(cv_thresholds)
+                
+                mlflow.log_metrics({
+                    'rf_cv_score': mean_score,
+                    'rf_cv_threshold': mean_threshold
+                })
+                
+                if mean_score > best_score:
+                    best_score = mean_score
+                    best_params = params
+                    best_threshold = mean_threshold
+            
+            mlflow.log_params({f"rf_{k}": v for k, v in best_params.items()})
+            self.thresholds['random_forest'] = best_threshold
+            
+            # Initialize final model with best parameters
+            self.rf_model = RandomForestClassifier(
+                **best_params,
+                class_weight='balanced_subsample',
+                n_jobs=-1,
+                random_state=42
+            )
+            
+            return best_params
+
+    def _tune_neural_network(self, X_train, y_train, X_val, y_val):
+        """Tune Neural Network with MLFlow tracking"""
+        print("\nTuning Neural Network hyperparameters...")
+        
+        with mlflow.start_run(nested=True, run_name="neural_network_tuning"):
+            best_score = -float('inf')
+            best_params = None
+            best_threshold = 0.3
+            best_state_dict = None
+            
+            tscv = TimeSeriesSplit(n_splits=3)
+            
+            for params in self._generate_param_combinations('neural_network'):
+                cv_scores = []
+                cv_thresholds = []
+                
+                for train_idx, val_idx in tscv.split(X_train):
+                    X_cv_train, X_cv_val = X_train[train_idx], X_train[val_idx]
+                    y_cv_train, y_cv_val = y_train[train_idx], y_train[val_idx]
+                    
+                    model = self._create_nn_model(params)
+                    X_cv_train_tensor = torch.FloatTensor(X_cv_train)
+                    y_cv_train_tensor = torch.LongTensor(y_cv_train)
+                    X_cv_val_tensor = torch.FloatTensor(X_cv_val)
+                    
+                    criterion = nn.CrossEntropyLoss(
+                        weight=torch.FloatTensor([1, self.class_weights[1]])
+                    )
+                    optimizer = torch.optim.Adam(
+                        model.parameters(),
+                        lr=params['learning_rate'],
+                        weight_decay=params['weight_decay']
+                    )
+                    
+                    patience = 10
+                    patience_counter = 0
+                    best_val_score = -float('inf')
+                    best_local_state = None
+                    
+                    for epoch in range(100):
+                        model.train()
+                        optimizer.zero_grad()
+                        outputs = model(X_cv_train_tensor)
+                        loss = criterion(outputs, y_cv_train_tensor)
+                        loss.backward()
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                        optimizer.step()
+                        
+                        model.eval()
+                        with torch.no_grad():
+                            val_outputs = model(X_cv_val_tensor)
+                            val_probs = val_outputs.numpy()[:, 1]
+                            threshold, score = self._optimize_threshold(y_cv_val, val_probs, 'recall')
+                            
+                            if score > best_val_score:
+                                best_val_score = score
+                                patience_counter = 0
+                                best_local_state = model.state_dict()
+                            else:
+                                patience_counter += 1
+                            
+                            if patience_counter >= patience:
+                                break
+                    
+                    model.load_state_dict(best_local_state)
+                    cv_scores.append(best_val_score)
+                    cv_thresholds.append(threshold)
+                
+                mean_score = np.mean(cv_scores)
+                mean_threshold = np.mean(cv_thresholds)
+                
+                mlflow.log_metrics({
+                    'nn_cv_score': mean_score,
+                    'nn_cv_threshold': mean_threshold
+                })
+                
+                if mean_score > best_score:
+                    best_score = mean_score
+                    best_params = params
+                    best_threshold = mean_threshold
+                    best_state_dict = best_local_state
+            
+            mlflow.log_params({f"nn_{k}": str(v) for k, v in best_params.items()})
+            self.thresholds['neural_network'] = best_threshold
+            
+            # Initialize final model with best parameters
+            self.nn_model = self._create_nn_model(best_params)
+            self.nn_model.load_state_dict(best_state_dict)
+            
+            return best_params
+
+    def _create_nn_model(self, params):
+        """Create Neural Network model with given parameters"""
+        class CustomNN(nn.Module):
+            def __init__(self, input_dim, hidden_layers, dropout_rates):
+                super().__init__()
+                
+                layers = []
+                prev_dim = input_dim
+                
+                for hidden_dim, dropout_rate in zip(hidden_layers, dropout_rates):
+                    layers.extend([
+                        nn.Linear(prev_dim, hidden_dim),
+                        nn.ReLU(),
+                        nn.Dropout(dropout_rate)
+                    ])
+                    prev_dim = hidden_dim
+                
+                layers.append(nn.Linear(prev_dim, 2))
+                self.model = nn.Sequential(*layers)
+                
+                # Initialize weights
+                for m in self.model:
+                    if isinstance(m, nn.Linear):
+                        nn.init.xavier_normal_(m.weight)
+                        nn.init.constant_(m.bias, 0)
+            
+            def forward(self, x):
+                logits = self.model(x)
+                return nn.functional.softmax(logits, dim=1)
+        
+        return CustomNN(
+            self.input_dim,
+            params['hidden_layers'],
+            params['dropout_rates']
+        )
+
+    def _generate_param_combinations(self, model_type):
+        """Generate parameter combinations for grid search"""
+        param_space = self.param_space[model_type]
+        param_names = list(param_space.keys())
+        param_values = list(param_space.values())
+        
+        combinations = list(itertools.product(*param_values))
+        return [dict(zip(param_names, combo)) for combo in combinations]
 
     def train(self, X_train, y_train, X_val, y_val):
-        """Enhanced training with improved monitoring and validation"""
-        print(f"Training ensemble with input dimension: {self.input_dim}")
+        """Enhanced training with hyperparameter tuning and original optimization"""
+        print(f"Starting ensemble training with hyperparameter tuning...")
         
-        # Train individual models with enhanced monitoring
-        xgb_metrics, xgb_importance = self._train_xgboost(X_train, y_train, X_val, y_val)
-        rf_metrics, rf_importance = self._train_random_forest(X_train, y_train, X_val, y_val)
-        nn_metrics, nn_importance = self._train_neural_network(X_train, y_train, X_val, y_val)
+        with mlflow.start_run(nested=True, run_name="ensemble_tuning") as run:
+            # Log initial setup
+            mlflow.log_params({
+                'input_dim': self.input_dim,
+                'initial_xgb_weight': self.weights[0],
+                'initial_rf_weight': self.weights[1],
+                'initial_nn_weight': self.weights[2]
+            })
+            
+            # Tune individual models
+            print("\nTuning individual models...")
+            xgb_params = self._tune_xgboost(X_train, y_train, X_val, y_val)
+            rf_params = self._tune_random_forest(X_train, y_train, X_val, y_val)
+            nn_params = self._tune_neural_network(X_train, y_train, X_val, y_val)
+            
+            # Train final models with best parameters
+            print("\nTraining final models with best parameters...")
+            
+            # XGBoost
+            self.xgb_model.fit(
+                X_train, y_train,
+                eval_set=[(X_val, y_val)],
+                early_stopping_rounds=30,
+                verbose=100
+            )
+            
+            # Random Forest
+            self.rf_model.fit(X_train, y_train)
+            
+            # Neural Network (already trained in tuning)
+            self.nn_model.eval()
+            
+            # Optimize ensemble weights
+            print("\nOptimizing ensemble weights...")
+            optimized_weights = self._optimize_weights(X_val, y_val)
+            
+            # Optimize final thresholds
+            print("\nOptimizing final thresholds...")
+            self._optimize_model_thresholds(X_val, y_val, metric='f1')
+            
+            # Get validation predictions for final evaluation
+            val_metrics = self._evaluate_ensemble(X_val, y_val)
+            
+            # Log final metrics
+            mlflow.log_metrics({
+                'final_val_auc': val_metrics['ensemble_auc'],
+                'final_val_precision': val_metrics['ensemble_precision'],
+                'final_val_recall': val_metrics['ensemble_recall'],
+                'final_val_f1': val_metrics['ensemble_f1']
+            })
+            
+            # Log model parameters
+            final_params = {
+                'xgboost': xgb_params,
+                'random_forest': rf_params,
+                'neural_network': nn_params,
+                'ensemble_weights': optimized_weights,
+                'thresholds': self.thresholds
+            }
+            
+            mlflow.log_dict(final_params, 'model_parameters.json')
+            
+            print("\nTraining completed successfully!")
+            return val_metrics
+
+    def _evaluate_ensemble(self, X, y):
+        """Evaluate ensemble performance"""
+        # Get predictions from each model
+        xgb_probs = self.xgb_model.predict_proba(X)[:, 1]
+        rf_probs = self.rf_model.predict_proba(X)[:, 1]
+        nn_probs = self.nn_model(torch.FloatTensor(X)).detach().numpy()[:, 1]
         
-        # Optimize model weights based on validation performance
-        print("\nOptimizing ensemble weights...")
-        self._optimize_weights(X_val, y_val)
+        # Individual model metrics
+        metrics = {}
+        for name, probs in [
+            ('xgboost', xgb_probs),
+            ('random_forest', rf_probs),
+            ('neural_network', nn_probs)
+        ]:
+            preds = (probs >= self.thresholds[name]).astype(int)
+            metrics.update({
+                f'{name}_auc': roc_auc_score(y, probs),
+                f'{name}_precision': precision_score(y, preds),
+                f'{name}_recall': recall_score(y, preds),
+                f'{name}_f1': f1_score(y, preds),
+                f'{name}_accuracy': accuracy_score(y, preds)
+            })
         
-        # Optimize thresholds with focus on fraud detection
-        print("\nOptimizing classification thresholds...")
-        self._optimize_model_thresholds(X_val, y_val, metric='f1')
+        # Ensemble predictions
+        ensemble_probs = (
+            self.weights[0] * xgb_probs +
+            self.weights[1] * rf_probs +
+            self.weights[2] * nn_probs
+        )
         
-        # Get ensemble predictions using optimized weights and thresholds
-        ensemble_val_probs = self.predict_proba(X_val)[:, 1]
-        ensemble_val_preds = (ensemble_val_probs >= self.thresholds['ensemble']).astype(int)
+        ensemble_preds = (ensemble_probs >= self.thresholds['ensemble']).astype(int)
         
-        # Calculate comprehensive ensemble metrics
-        ensemble_metrics = {
-            'ensemble_val_auc': roc_auc_score(y_val, ensemble_val_probs),
-            'ensemble_val_accuracy': accuracy_score(y_val, ensemble_val_preds),
-            'ensemble_val_precision': precision_score(y_val, ensemble_val_preds),
-            'ensemble_val_recall': recall_score(y_val, ensemble_val_preds),
-            'ensemble_val_f1': f1_score(y_val, ensemble_val_preds),
-            'ensemble_threshold': self.thresholds['ensemble']
-        }
+        # Ensemble metrics
+        metrics.update({
+            'ensemble_auc': roc_auc_score(y, ensemble_probs),
+            'ensemble_precision': precision_score(y, ensemble_preds),
+            'ensemble_recall': recall_score(y, ensemble_preds),
+            'ensemble_f1': f1_score(y, ensemble_preds),
+            'ensemble_accuracy' : accuracy_score(y, ensemble_preds),
+            'confusion_matrix': confusion_matrix(y, ensemble_preds).tolist()
+        })
         
-        # Calculate feature importance rankings
-        feature_importance = {
-            'xgboost': {name: score for name, score in zip(self.feature_names, xgb_importance)},
-            'random_forest': {name: score for name, score in zip(self.feature_names, rf_importance)},
-            'neural_network': {name: score for name, score in zip(self.feature_names, nn_importance)}
-        }
-        
-        # Compile all metrics and information
-        all_metrics = {
-            'xgboost': xgb_metrics,
-            'random_forest': rf_metrics,
-            'neural_network': nn_metrics,
-            'ensemble': ensemble_metrics,
-            'weights': self.weights,
-            'thresholds': self.thresholds,
-            'feature_importance': feature_importance
-        }
-        
-        return all_metrics
+        return metrics
 
     def predict_proba(self, X):
-        """Get probability predictions using optimized weights"""
+        """Get probability predictions with optimized weights"""
         X_tensor = torch.FloatTensor(X)
         
         # Get predictions from each model
@@ -455,7 +613,7 @@ class FraudDetectionEnsemble:
         rf_probs = self.rf_model.predict_proba(X)[:, 1]
         nn_probs = self.nn_model(X_tensor).detach().numpy()[:, 1]
         
-        # Calculate weighted probabilities using optimized weights
+        # Calculate weighted probabilities
         weighted_probs = (
             self.weights[0] * xgb_probs +
             self.weights[1] * rf_probs +
@@ -468,31 +626,12 @@ class FraudDetectionEnsemble:
         """Get class predictions using optimized weights and thresholds"""
         if threshold is None:
             threshold = self.thresholds['ensemble']
-            
+        
         probas = self.predict_proba(X)
         return (probas[:, 1] >= threshold).astype(int)
-    
-    def predict_model(self, X, model_name):
-        """Get predictions from a specific model using its optimized threshold"""
-        if model_name not in self.thresholds:
-            raise ValueError(f"Unknown model: {model_name}")
-        
-        if model_name == 'xgboost':
-            probs = self.xgb_model.predict_proba(X)[:, 1]
-            threshold = self.thresholds['xgboost']
-        elif model_name == 'random_forest':
-            probs = self.rf_model.predict_proba(X)[:, 1]
-            threshold = self.thresholds['random_forest']
-        elif model_name == 'neural_network':
-            probs = self.nn_model(torch.FloatTensor(X)).detach().numpy()[:, 1]
-            threshold = self.thresholds['neural_network']
-        else:
-            raise ValueError(f"Unsupported model: {model_name}")
-        
-        return (probs >= threshold).astype(int)
 
     def get_feature_importance(self, method='ensemble'):
-        """Get feature importance scores using specified method"""
+        """Get feature importance with support for tuned models"""
         if method == 'ensemble':
             # Combine feature importance from all models
             xgb_importance = self.xgb_model.feature_importances_
@@ -510,7 +649,7 @@ class FraudDetectionEnsemble:
             rf_importance = rf_importance / rf_importance.sum()
             nn_importance = nn_importance / nn_importance.sum()
             
-            # Weighted average of importance scores
+            # Weighted average using tuned weights
             ensemble_importance = (
                 self.weights[0] * xgb_importance +
                 self.weights[1] * rf_importance +
@@ -520,24 +659,11 @@ class FraudDetectionEnsemble:
             return {
                 name: score for name, score in zip(self.feature_names, ensemble_importance)
             }
-        elif method in ['xgboost', 'random_forest', 'neural_network']:
-            return getattr(self, f'{method}_feature_importance')()
         else:
             raise ValueError(f"Unsupported importance method: {method}")
 
-    def get_optimized_parameters(self):
-        """Return current optimized parameters"""
-        return {
-            'weights': self.weights,
-            'thresholds': self.thresholds,
-            'model_parameters': {
-                'xgboost': self.xgb_model.get_params(),
-                'random_forest': self.rf_model.get_params()
-            }
-        }
-
     def save_model(self, path):
-        """Save the ensemble model to disk"""
+        """Save the tuned ensemble model"""
         model_data = {
             'weights': self.weights,
             'thresholds': self.thresholds,
@@ -545,16 +671,23 @@ class FraudDetectionEnsemble:
             'xgb_model': self.xgb_model,
             'rf_model': self.rf_model,
             'nn_model_state': self.nn_model.state_dict(),
-            'input_dim': self.input_dim
+            'input_dim': self.input_dim,
+            'best_params': {
+                'xgboost': self.xgb_model.get_params(),
+                'random_forest': self.rf_model.get_params(),
+                'neural_network': {
+                    k: v for k, v in self.nn_model.state_dict().items()
+                }
+            }
         }
         torch.save(model_data, path)
 
     @classmethod
     def load_model(cls, path):
-        """Load the ensemble model from disk"""
+        """Load a tuned ensemble model"""
         model_data = torch.load(path)
         
-        # Initialize ensemble with saved parameters
+        # Initialize ensemble
         ensemble = cls(
             input_dim=model_data['input_dim'],
             feature_names=model_data['feature_names'],
@@ -569,132 +702,6 @@ class FraudDetectionEnsemble:
         
         return ensemble
 
-
-def train_fraud_detection_system(raw_data, test_size=0.25):
-    """Main training function with improved validation and ensemble strategy"""
-    print("Starting fraud detection system training...")
-    
-    # Initialize preprocessor
-    preprocessor = TransactionPreprocessor()
-    
-    # Convert TX_DATETIME to datetime format before validation
-    try:
-        raw_data['TX_DATETIME'] = pd.to_datetime(raw_data['TX_DATETIME'])
-    except Exception as e:
-        print(f"Error converting TX_DATETIME to datetime format: {str(e)}")
-        raw_data['TX_DATETIME'] = pd.to_datetime(raw_data['TX_DATETIME'], format='%Y-%m-%d %H:%M:%S')
-    
-    # Validate input data first
-    print("Validating input data...")
-    issues = preprocessor.validate_features(raw_data)
-    if issues:
-        print("Data validation issues found:")
-        for issue in issues:
-            print(f"- {issue}")
-        raise ValueError("Data validation failed. Please fix the issues before proceeding.")
-    
-    print("Preprocessing data and engineering features...")
-
-    # Get feature names and metadata
-    feature_names = preprocessor.get_feature_names()
-    feature_metadata = preprocessor.get_feature_metadata()
-    
-    # Sort by time and create time-based split
-    raw_data['TX_DATETIME'] = pd.to_datetime(raw_data['TX_DATETIME'])
-    raw_data = raw_data.sort_values('TX_DATETIME')
-    
-    # Use time-based split with validation buffer
-    train_end_date = raw_data['TX_DATETIME'].quantile(0.6)
-    val_start_date = raw_data['TX_DATETIME'].quantile(0.6)
-    val_end_date = raw_data['TX_DATETIME'].quantile(0.8)
-    test_start_date = raw_data['TX_DATETIME'].quantile(0.8)
-    
-    train_data = raw_data[raw_data['TX_DATETIME'] <= train_end_date]
-    val_data = raw_data[(raw_data['TX_DATETIME'] > val_start_date) & 
-                        (raw_data['TX_DATETIME'] <= val_end_date)]
-    test_data = raw_data[raw_data['TX_DATETIME'] > test_start_date]
-    
-    # Process data for each split
-    print("\nProcessing training data...")
-    feature_groups_train, y_train_resampled = preprocessor.transform(train_data, training=True)
-    
-    print("Processing validation data...")
-    feature_groups_val = preprocessor.transform(val_data, training=False)
-    y_val = val_data['TX_FRAUD'].values
-    
-    print("Processing test data...")
-    feature_groups_test = preprocessor.transform(test_data, training=False)
-    y_test = test_data['TX_FRAUD'].values
-    
-    # Convert feature groups to numpy arrays
-    X_train = np.concatenate([feature_groups_train[group] for group in preprocessor.feature_groups.keys()], axis=1)
-    X_val = np.concatenate([feature_groups_val[group] for group in preprocessor.feature_groups.keys()], axis=1)
-    X_test = np.concatenate([feature_groups_test[group] for group in preprocessor.feature_groups.keys()], axis=1)
-    
-    # Print and log data statistics
-    print("\nData Statistics:")
-    data_stats = {
-        'total_samples': len(raw_data),
-        'training_samples': len(X_train),
-        'validation_samples': len(X_val),
-        'test_samples': len(X_test),
-        'feature_dimension': X_train.shape[1],
-        'original_fraud_ratio': float(raw_data['TX_FRAUD'].mean()),
-        'training_fraud_ratio': float(y_train_resampled.mean()),
-        'validation_fraud_ratio': float(y_val.mean()),
-        'test_fraud_ratio': float(y_test.mean())
-    }
-    
-    for stat, value in data_stats.items():
-        print(f"{stat}: {value}")
-    
-    # Initialize ensemble with dynamic weight optimization
-    print("\nInitializing ensemble model...")
-    ensemble = FraudDetectionEnsemble(
-        input_dim=X_train.shape[1],
-        feature_names=feature_names
-    )
-    
-    with mlflow.start_run(run_name="fraud_detection_ensemble", 
-                          experiment_id= mlflow.get_experiment_by_name('/Users/kehinde.awomuti@pwc.com/fraud_detection_train').experiment_id) as run:
-        # Log dataset info and feature metadata
-        mlflow.log_params(data_stats)
-        mlflow.log_dict(feature_metadata, 'feature_metadata.json')
-        
-        # Train ensemble with validation monitoring
-        print("\nTraining ensemble...")
-        metrics = ensemble.train(X_train, y_train_resampled, X_val, y_val)
-        
-        # Optimize ensemble weights using validation performance
-        print("\nOptimizing ensemble weights...")
-        ensemble._optimize_weights(X_val, y_val)
-        
-        # Evaluate on test set
-        print("\nEvaluating on test set...")
-        test_metrics = evaluate_ensemble(ensemble, X_test, y_test)
-        metrics['test'] = test_metrics
-        
-        # Log final metrics summary
-        mlflow.log_dict(metrics, 'final_metrics.json')
-        
-        # Prepare model artifacts
-        input_example = pd.DataFrame(X_train[:1], columns=feature_names)
-        signature = mlflow.models.signature.infer_signature(
-            X_train, 
-            ensemble.xgb_model.predict_proba(X_train)
-        )
-        
-        # Log individual models
-        log_models(ensemble, signature, input_example)
-        
-        # Create and log summary report
-        create_summary_report(data_stats, metrics, feature_metadata)
-        
-        
-        print("\nTraining completed successfully!")
-        print(f"MLflow run ID: {run.info.run_id}")
-        
-        return preprocessor, ensemble, metrics
 
 def evaluate_ensemble(ensemble, X, y):
     """Evaluate ensemble model with comprehensive metrics"""
@@ -826,6 +833,133 @@ def create_summary_report(data_stats, metrics, feature_metadata):
     with open("training_summary.txt", "w") as f:
         f.write(summary_report)
     mlflow.log_artifact("training_summary.txt")# Define the directory containing the files
+
+
+def train_fraud_detection_system(raw_data, test_size=0.25):
+    """Main training function with improved validation and ensemble strategy"""
+    print("Starting fraud detection system training...")
+    
+    # Initialize preprocessor
+    preprocessor = TransactionPreprocessor()
+    
+    # Convert TX_DATETIME to datetime format before validation
+    try:
+        raw_data['TX_DATETIME'] = pd.to_datetime(raw_data['TX_DATETIME'])
+    except Exception as e:
+        print(f"Error converting TX_DATETIME to datetime format: {str(e)}")
+        raw_data['TX_DATETIME'] = pd.to_datetime(raw_data['TX_DATETIME'], format='%Y-%m-%d %H:%M:%S')
+    
+    # Validate input data first
+    print("Validating input data...")
+    issues = preprocessor.validate_features(raw_data)
+    if issues:
+        print("Data validation issues found:")
+        for issue in issues:
+            print(f"- {issue}")
+        raise ValueError("Data validation failed. Please fix the issues before proceeding.")
+    
+    print("Preprocessing data and engineering features...")
+
+    # Get feature names and metadata
+    feature_names = preprocessor.get_feature_names()
+    feature_metadata = preprocessor.get_feature_metadata()
+    
+    # Sort by time and create time-based split
+    raw_data['TX_DATETIME'] = pd.to_datetime(raw_data['TX_DATETIME'])
+    raw_data = raw_data.sort_values('TX_DATETIME')
+    
+    # Use time-based split with validation buffer
+    train_end_date = raw_data['TX_DATETIME'].quantile(0.6)
+    val_start_date = raw_data['TX_DATETIME'].quantile(0.6)
+    val_end_date = raw_data['TX_DATETIME'].quantile(0.8)
+    test_start_date = raw_data['TX_DATETIME'].quantile(0.8)
+    
+    train_data = raw_data[raw_data['TX_DATETIME'] <= train_end_date]
+    val_data = raw_data[(raw_data['TX_DATETIME'] > val_start_date) & 
+                        (raw_data['TX_DATETIME'] <= val_end_date)]
+    test_data = raw_data[raw_data['TX_DATETIME'] > test_start_date]
+    
+    # Process data for each split
+    print("\nProcessing training data...")
+    feature_groups_train, y_train_resampled = preprocessor.transform(train_data, training=True)
+    
+    print("Processing validation data...")
+    feature_groups_val = preprocessor.transform(val_data, training=False)
+    y_val = val_data['TX_FRAUD'].values
+    
+    print("Processing test data...")
+    feature_groups_test = preprocessor.transform(test_data, training=False)
+    y_test = test_data['TX_FRAUD'].values
+    
+    # Convert feature groups to numpy arrays
+    X_train = np.concatenate([feature_groups_train[group] for group in preprocessor.feature_groups.keys()], axis=1)
+    X_val = np.concatenate([feature_groups_val[group] for group in preprocessor.feature_groups.keys()], axis=1)
+    X_test = np.concatenate([feature_groups_test[group] for group in preprocessor.feature_groups.keys()], axis=1)
+    
+    # Print and log data statistics
+    print("\nData Statistics:")
+    data_stats = {
+        'total_samples': len(raw_data),
+        'training_samples': len(X_train),
+        'validation_samples': len(X_val),
+        'test_samples': len(X_test),
+        'feature_dimension': X_train.shape[1],
+        'original_fraud_ratio': float(raw_data['TX_FRAUD'].mean()),
+        'training_fraud_ratio': float(y_train_resampled.mean()),
+        'validation_fraud_ratio': float(y_val.mean()),
+        'test_fraud_ratio': float(y_test.mean())
+    }
+    
+    for stat, value in data_stats.items():
+        print(f"{stat}: {value}")
+    
+    # Initialize ensemble with dynamic weight optimization
+    print("\nInitializing ensemble model...")
+    ensemble = FraudDetectionEnsemble(
+        input_dim=X_train.shape[1],
+        feature_names=feature_names
+    )
+    
+    with mlflow.start_run(run_name="fraud_detection_ensemble", 
+                          experiment_id= mlflow.get_experiment_by_name('/Users/kehinde.awomuti@pwc.com/fraud_detection_train').experiment_id) as run:
+        # Log dataset info and feature metadata
+        mlflow.log_params(data_stats)
+        mlflow.log_dict(feature_metadata, 'feature_metadata.json')
+        
+        # Train ensemble with validation monitoring
+        print("\nTraining ensemble...")
+        metrics = ensemble.train(X_train, y_train_resampled, X_val, y_val)
+        
+        # Optimize ensemble weights using validation performance
+        print("\nOptimizing ensemble weights...")
+        ensemble._optimize_weights(X_val, y_val)
+        
+        # Evaluate on test set
+        print("\nEvaluating on test set...")
+        test_metrics = evaluate_ensemble(ensemble, X_test, y_test)
+        metrics['test'] = test_metrics
+        
+        # Log final metrics summary
+        mlflow.log_dict(metrics, 'final_metrics.json')
+        
+        # Prepare model artifacts
+        input_example = pd.DataFrame(X_train[:1], columns=feature_names)
+        signature = mlflow.models.signature.infer_signature(
+            X_train, 
+            ensemble.xgb_model.predict_proba(X_train)
+        )
+        
+        # Log individual models
+        log_models(ensemble, signature, input_example)
+        
+        # Create and log summary report
+        create_summary_report(data_stats, metrics, feature_metadata)
+        
+        
+        print("\nTraining completed successfully!")
+        print(f"MLflow run ID: {run.info.run_id}")
+        
+        return preprocessor, ensemble, metrics
 
 
 directory = '/Workspace/Users/kehinde.awomuti@pwc.com/ccfrauddetection/data'
