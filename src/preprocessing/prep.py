@@ -354,7 +354,7 @@ class TransactionPreprocessor:
                 # Apply SMOTE with careful sampling
                 n_minority = (y == 1).sum()
                 n_majority = (y == 0).sum()
-                target_minority = int(n_majority * 0.30)  # 15% fraud ratio
+                target_minority = int(n_majority * 0.15)  # 15% fraud ratio
                 
                 smote = SMOTE(
                     sampling_strategy={1: min(target_minority, n_majority)},
