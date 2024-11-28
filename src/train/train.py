@@ -119,99 +119,74 @@ class FraudDetectionEnsemble:
         self.xgb_model = None
         self.rf_model = None
         self.nn_model = None
+        self.experiment_name = '/Users/kehinde.awomuti@pwc.com/fraud_detection_train'
 
-    def _optimize_threshold(self, y_true, y_prob, metric='f1', threshold_range=None):
+    def _optimize_threshold(self, y_true, y_prob, class_weight=0.55):
         """Original threshold optimization logic"""
-        if threshold_range is None:
-            threshold_range = np.linspace(0.1, 0.9, 100)
-        
-        best_threshold = 0.3  # Default threshold favoring recall
-        best_score = 0
-        
-        for threshold in threshold_range:
-            y_pred = (y_prob >= threshold).astype(int)
-            
-            if metric == 'f1':
-                score = f1_score(y_true, y_pred)
-            elif metric == 'precision':
-                score = precision_score(y_true, y_pred)
-            elif metric == 'recall':
-                score = recall_score(y_true, y_pred)
-            elif metric == 'balanced':
-                prec = precision_score(y_true, y_pred)
-                rec = recall_score(y_true, y_pred)
-                score = 2 * (prec * rec) / (prec + rec) if (prec + rec) > 0 else 0
-            
-            if score > best_score:
-                best_score = score
-                best_threshold = threshold
-        
-        return best_threshold, best_score
 
-    def _optimize_model_thresholds(self, X_val, y_val, metric='f1'):
-        """Optimize classification thresholds for all models"""
-        print("\nOptimizing classification thresholds...")
+        fpr, tpr, thresholds = roc_curve(y_true, y_prob)
+        tnr = 1 - fpr
+        fnr = 1 - tpr
         
-        # Get predictions from each model
+        # Weight FNR more heavily (class_weight for fraud)
+        costs = (1 - class_weight) * fpr + class_weight * fnr
+        threshold_penalty = 0.1 * np.abs(thresholds - 0.5)
+        costs+= threshold_penalty 
+
+        optimal_idx = np.argmin(costs)
+        
+        return thresholds[optimal_idx], costs[optimal_idx]
+
+
+    def _optimize_model_thresholds(self, X_val, y_val, class_weight=0.55):
+        """Optimize thresholds using FNR/FPR costs"""
+        # Get predictions
         xgb_probs = self.xgb_model.predict_proba(X_val)[:, 1]
         rf_probs = self.rf_model.predict_proba(X_val)[:, 1]
         nn_probs = self.nn_model(torch.FloatTensor(X_val)).detach().numpy()[:, 1]
         
-        # Optimize thresholds for individual models
-        self.thresholds['xgboost'], xgb_score = self._optimize_threshold(y_val, xgb_probs, metric)
-        self.thresholds['random_forest'], rf_score = self._optimize_threshold(y_val, rf_probs, metric)
-        self.thresholds['neural_network'], nn_score = self._optimize_threshold(y_val, nn_probs, metric)
+        # Optimize individual models
+        self.thresholds['xgboost'], xgb_cost = self._optimize_threshold(y_val, xgb_probs, class_weight)
+        self.thresholds['random_forest'], rf_cost = self._optimize_threshold(y_val, rf_probs, class_weight)
+        self.thresholds['neural_network'], nn_cost = self._optimize_threshold(y_val, nn_probs, class_weight)
         
-        # Get ensemble predictions with current weights
-        ensemble_probs = (
-            self.weights[0] * xgb_probs +
-            self.weights[1] * rf_probs +
-            self.weights[2] * nn_probs
-        )
-        
-        # Optimize ensemble threshold
-        self.thresholds['ensemble'], ensemble_score = self._optimize_threshold(y_val, ensemble_probs, metric)
-        
-        print(f"\nOptimized Thresholds ({metric}):")
-        print(f"XGBoost: {self.thresholds['xgboost']:.3f} (score: {xgb_score:.3f})")
-        print(f"Random Forest: {self.thresholds['random_forest']:.3f} (score: {rf_score:.3f})")
-        print(f"Neural Network: {self.thresholds['neural_network']:.3f} (score: {nn_score:.3f})")
-        print(f"Ensemble: {self.thresholds['ensemble']:.3f} (score: {ensemble_score:.3f})")
-        
+        # Optimize ensemble
+        ensemble_probs = self.weights[0] * xgb_probs + self.weights[1] * rf_probs + self.weights[2] * nn_probs
+        self.thresholds['ensemble'], ensemble_cost = self._optimize_threshold(y_val, ensemble_probs, class_weight)
+
         return self.thresholds
-    
-    def _optimize_weights(self, X_val, y_val):
-        """Original weight optimization logic"""
-        print("\nOptimizing ensemble weights...")
-        
-        # Get predictions from each model
-        xgb_probs = self.xgb_model.predict_proba(X_val)[:, 1]
-        rf_probs = self.rf_model.predict_proba(X_val)[:, 1]
-        nn_probs = self.nn_model(torch.FloatTensor(X_val)).detach().numpy()[:, 1]
-        
-        def objective(weights):
-            # Normalize weights
-            weights = np.array(weights)
-            weights = weights / weights.sum()
             
-            # Calculate weighted probabilities
+    def _optimize_weights(self, X_val, y_val, class_weight = 0.55):
+        def objective(weights):
+            weights = np.array(weights) / np.sum(weights)
+            
+            xgb_probs = self.xgb_model.predict_proba(X_val)[:, 1]
+            rf_probs = self.rf_model.predict_proba(X_val)[:, 1]
+            nn_probs = self.nn_model(torch.FloatTensor(X_val)).detach().numpy()[:, 1]
+            
             ensemble_probs = (
                 weights[0] * xgb_probs +
                 weights[1] * rf_probs +
                 weights[2] * nn_probs
             )
             
-            # Optimize for both AUC and recall
-            auc_score = roc_auc_score(y_val, ensemble_probs)
-            optimal_threshold, _ = self._optimize_threshold(y_val, ensemble_probs, 'f1')
-            ensemble_preds = (ensemble_probs >= optimal_threshold).astype(int)
-            recall = recall_score(y_val, ensemble_preds)
-            f1 = f1_score(y_val, ensemble_preds)
-            
-            # Combined score with emphasis on recall
-            return -(0.4 * auc_score + 0.3 * recall + 0.3 * f1)
+            fpr, tpr, thresholds = roc_curve(y_val, ensemble_probs)
+            fnr = 1 - tpr
+            costs = []
+
+            for threshold in thresholds:
+                preds = (ensemble_probs >= threshold).astype(int)
+                tn, fp, fn, tp = confusion_matrix(y_val, preds).ravel()
+                fpr = fp / (fp + tn)
+                fnr = fn / (fn + tp)
+                # Higher penalty for false negatives
+                cost = (1-class_weight) * fpr + class_weight * fnr
+                costs.append(cost)
+ 
+            best_threshold_idx = np.argmin(costs)
+            self.thresholds['ensemble'] = thresholds[best_threshold_idx]            
+            return costs[best_threshold_idx]
         
-        # Optimize weights
         initial_weights = np.array(self.weights)
         bounds = [(0, 1)] * 3
         constraints = {'type': 'eq', 'fun': lambda w: np.sum(w) - 1}
@@ -224,24 +199,15 @@ class FraudDetectionEnsemble:
             method='SLSQP'
         )
         
-        # Update weights
         self.weights = list(result.x / result.x.sum())
-        mlflow.log_params({
-            'xgboost_weight': self.weights[0],
-            'rf_weight': self.weights[1],
-            'nn_weight': self.weights[2]
-        })
-        
-        print(f"Optimized weights: XGBoost={self.weights[0]:.3f}, "
-              f"RF={self.weights[1]:.3f}, NN={self.weights[2]:.3f}")
-        
         return self.weights
 
     def _tune_xgboost(self, X_train, y_train, X_val, y_val):
         """Tune XGBoost with MLFlow tracking"""
         print("\nTuning XGBoost hyperparameters...")
         
-        with mlflow.start_run(nested=True, run_name="xgboost_tuning"):
+        with mlflow.start_run(nested=True, run_name="xgboost_tuning", experiment_id=
+                              mlflow.get_experiment_by_name(self.experiment_name).experiment_id):
             best_score = -float('inf')
             best_params = None
             best_threshold = 0.3
@@ -270,7 +236,7 @@ class FraudDetectionEnsemble:
                     )
                     
                     y_pred_proba = model.predict_proba(X_cv_val)[:, 1]
-                    threshold, score = self._optimize_threshold(y_cv_val, y_pred_proba, 'f1')
+                    threshold, score = self._optimize_threshold(y_cv_val, y_pred_proba)
                     
                     cv_scores.append(score)
                     cv_thresholds.append(threshold)
@@ -300,7 +266,8 @@ class FraudDetectionEnsemble:
         """Tune Random Forest with MLFlow tracking"""
         print("\nTuning Random Forest hyperparameters...")
         
-        with mlflow.start_run(nested=True, run_name="random_forest_tuning"):
+        with mlflow.start_run(nested=True, run_name="random_forest_tuning", experiment_id= 
+                              mlflow.get_experiment_by_name(self.experiment_name).experiment_id):
             best_score = -float('inf')
             best_params = None
             best_threshold = 0.3
@@ -319,12 +286,13 @@ class FraudDetectionEnsemble:
                         **params,
                         class_weight='balanced_subsample',
                         n_jobs=-1,
-                        random_state=42
+                        random_state=0,
+                        criterion = 'log_loss'
                     )
                     
                     model.fit(X_cv_train, y_cv_train)
                     y_pred_proba = model.predict_proba(X_cv_val)[:, 1]
-                    threshold, score = self._optimize_threshold(y_cv_val, y_pred_proba, 'recall')
+                    threshold, score = self._optimize_threshold(y_cv_val, y_pred_proba)
                     
                     cv_scores.append(score)
                     cv_thresholds.append(threshold)
@@ -359,7 +327,8 @@ class FraudDetectionEnsemble:
         """Tune Neural Network with MLFlow tracking"""
         print("\nTuning Neural Network hyperparameters...")
         
-        with mlflow.start_run(nested=True, run_name="neural_network_tuning"):
+        with mlflow.start_run(nested=True, run_name="neural_network_tuning", experiment_id =
+                              mlflow.get_experiment_by_name(self.experiment_name).experiment_id):
             best_score = -float('inf')
             best_params = None
             best_threshold = 0.3
@@ -407,7 +376,7 @@ class FraudDetectionEnsemble:
                         with torch.no_grad():
                             val_outputs = model(X_cv_val_tensor)
                             val_probs = val_outputs.numpy()[:, 1]
-                            threshold, score = self._optimize_threshold(y_cv_val, val_probs, 'recall')
+                            threshold, score = self._optimize_threshold(y_cv_val, val_probs)
                             
                             if score > best_val_score:
                                 best_val_score = score
@@ -490,12 +459,96 @@ class FraudDetectionEnsemble:
         
         combinations = list(itertools.product(*param_values))
         return [dict(zip(param_names, combo)) for combo in combinations]
+    
+    def _evaluate_ensemble(self, X, y):
+        """Evaluate ensemble performance"""
+        # Get predictions from each model
+        xgb_probs = self.xgb_model.predict_proba(X)[:, 1]
+        rf_probs = self.rf_model.predict_proba(X)[:, 1]
+        nn_probs = self.nn_model(torch.FloatTensor(X)).detach().numpy()[:, 1]
+        
+        # Individual model metrics
+        metrics = {}
+        for name, probs in [
+            ('xgboost', xgb_probs),
+            ('random_forest', rf_probs),
+            ('neural_network', nn_probs)
+        ]:
+            preds = (probs >= self.thresholds[name]).astype(int)
+            metrics.update({
+                f'{name}_val_auc': roc_auc_score(y, probs),
+                f'{name}_val_precision': precision_score(y, preds),
+                f'{name}_val_recall': recall_score(y, preds),
+                f'{name}_val_f1': f1_score(y, preds),
+                f'{name}_val_accuracy': accuracy_score(y, preds)
+            })
+        
+        # Ensemble predictions
+        ensemble_probs = (
+            self.weights[0] * xgb_probs +
+            self.weights[1] * rf_probs +
+            self.weights[2] * nn_probs
+        )
+        
+        ensemble_preds = (ensemble_probs >= self.thresholds['ensemble']).astype(int)
+        
+        # Ensemble metrics
+        metrics.update({
+            'ensemble_val_auc': roc_auc_score(y, ensemble_probs),
+            'ensemble_val_precision': precision_score(y, ensemble_preds),
+            'ensemble_val_recall': recall_score(y, ensemble_preds),
+            'ensemble_val_f1': f1_score(y, ensemble_preds),
+            'ensemble_val_accuracy' : accuracy_score(y, ensemble_preds)
+        })
+        
+        return metrics
+
+    def predict_proba(self, X):
+        """Get probability predictions with optimized weights"""
+        X_tensor = torch.FloatTensor(X)
+        
+        # Get predictions from each model
+        xgb_probs = self.xgb_model.predict_proba(X)[:, 1]
+        rf_probs = self.rf_model.predict_proba(X)[:, 1]
+        nn_probs = self.nn_model(X_tensor).detach().numpy()[:, 1]
+        
+        # Calculate weighted probabilities
+        weighted_probs = (
+            self.weights[0] * xgb_probs +
+            self.weights[1] * rf_probs +
+            self.weights[2] * nn_probs
+        )
+        
+        return np.vstack((1 - weighted_probs, weighted_probs)).T
+
+    def predict(self, X, threshold=None, optimize_threshold=False, y_true=None, class_weight = 0.55):
+        """Get class predictions using optimized weights and thresholds"""
+        probas = self.predict_proba(X)
+        
+        if optimize_threshold and y_true is not None:
+            fpr, tpr, thresholds = roc_curve(y_true, probas[:, 1])
+            costs = []
+            for t in thresholds:
+                preds = (probas[:, 1] >= t).astype(int)
+                tn, fp, fn, tp = confusion_matrix(y_true, preds).ravel()  
+                fpr = fp / (fp + tn)
+                fnr = fn / (fn + tp)
+                cost = (1-class_weight) * fpr + (class_weight * fnr)
+                costs.append(cost)
+            
+            threshold = thresholds[np.argmin(costs)]
+        elif threshold is None:
+            threshold = self.thresholds['ensemble']
+            
+        return (probas[:, 1] >= threshold).astype(int)
+
 
     def train(self, X_train, y_train, X_val, y_val):
         """Enhanced training with hyperparameter tuning and original optimization"""
         print(f"Starting ensemble training with hyperparameter tuning...")
         
-        with mlflow.start_run(nested=True, run_name="ensemble_tuning") as run:
+        with mlflow.start_run(nested=True, run_name="ensemble_tuning", experiment_id=
+                              mlflow.get_experiment_by_name(self.experiment_name).experiment_id) as run:
             # Log initial setup
             mlflow.log_params({
                 'input_dim': self.input_dim,
@@ -533,17 +586,18 @@ class FraudDetectionEnsemble:
             
             # Optimize final thresholds
             print("\nOptimizing final thresholds...")
-            self._optimize_model_thresholds(X_val, y_val, metric='f1')
+            self._optimize_model_thresholds(X_val, y_val)
             
             # Get validation predictions for final evaluation
             val_metrics = self._evaluate_ensemble(X_val, y_val)
             
             # Log final metrics
             mlflow.log_metrics({
-                'final_val_auc': val_metrics['ensemble_auc'],
-                'final_val_precision': val_metrics['ensemble_precision'],
-                'final_val_recall': val_metrics['ensemble_recall'],
-                'final_val_f1': val_metrics['ensemble_f1']
+                'final_val_auc': val_metrics['ensemble_val_auc'],
+                'final_val_precision': val_metrics['ensemble_val_precision'],
+                'final_val_recall': val_metrics['ensemble_val_recall'],
+                'final_val_accuracy': val_metrics['ensemble_val_accuracy'],
+                'final_val_f1': val_metrics['ensemble_val_f1']
             })
             
             # Log model parameters
@@ -560,149 +614,7 @@ class FraudDetectionEnsemble:
             print("\nTraining completed successfully!")
             return val_metrics
 
-    def _evaluate_ensemble(self, X, y):
-        """Evaluate ensemble performance"""
-        # Get predictions from each model
-        xgb_probs = self.xgb_model.predict_proba(X)[:, 1]
-        rf_probs = self.rf_model.predict_proba(X)[:, 1]
-        nn_probs = self.nn_model(torch.FloatTensor(X)).detach().numpy()[:, 1]
-        
-        # Individual model metrics
-        metrics = {}
-        for name, probs in [
-            ('xgboost', xgb_probs),
-            ('random_forest', rf_probs),
-            ('neural_network', nn_probs)
-        ]:
-            preds = (probs >= self.thresholds[name]).astype(int)
-            metrics.update({
-                f'{name}_auc': roc_auc_score(y, probs),
-                f'{name}_precision': precision_score(y, preds),
-                f'{name}_recall': recall_score(y, preds),
-                f'{name}_f1': f1_score(y, preds),
-                f'{name}_accuracy': accuracy_score(y, preds)
-            })
-        
-        # Ensemble predictions
-        ensemble_probs = (
-            self.weights[0] * xgb_probs +
-            self.weights[1] * rf_probs +
-            self.weights[2] * nn_probs
-        )
-        
-        ensemble_preds = (ensemble_probs >= self.thresholds['ensemble']).astype(int)
-        
-        # Ensemble metrics
-        metrics.update({
-            'ensemble_auc': roc_auc_score(y, ensemble_probs),
-            'ensemble_precision': precision_score(y, ensemble_preds),
-            'ensemble_recall': recall_score(y, ensemble_preds),
-            'ensemble_f1': f1_score(y, ensemble_preds),
-            'ensemble_accuracy' : accuracy_score(y, ensemble_preds),
-            'confusion_matrix': confusion_matrix(y, ensemble_preds).tolist()
-        })
-        
-        return metrics
-
-    def predict_proba(self, X):
-        """Get probability predictions with optimized weights"""
-        X_tensor = torch.FloatTensor(X)
-        
-        # Get predictions from each model
-        xgb_probs = self.xgb_model.predict_proba(X)[:, 1]
-        rf_probs = self.rf_model.predict_proba(X)[:, 1]
-        nn_probs = self.nn_model(X_tensor).detach().numpy()[:, 1]
-        
-        # Calculate weighted probabilities
-        weighted_probs = (
-            self.weights[0] * xgb_probs +
-            self.weights[1] * rf_probs +
-            self.weights[2] * nn_probs
-        )
-        
-        return np.vstack((1 - weighted_probs, weighted_probs)).T
-
-    def predict(self, X, threshold=None):
-        """Get class predictions using optimized weights and thresholds"""
-        if threshold is None:
-            threshold = self.thresholds['ensemble']
-        
-        probas = self.predict_proba(X)
-        return (probas[:, 1] >= threshold).astype(int)
-
-    def get_feature_importance(self, method='ensemble'):
-        """Get feature importance with support for tuned models"""
-        if method == 'ensemble':
-            # Combine feature importance from all models
-            xgb_importance = self.xgb_model.feature_importances_
-            rf_importance = self.rf_model.feature_importances_
-            
-            # Get neural network importance using integrated gradients
-            self.nn_model.eval()
-            with torch.no_grad():
-                ig = IntegratedGradients(self.nn_model)
-                attributions = ig.attribute(torch.zeros((1, self.input_dim)), target=1)
-                nn_importance = attributions.mean(dim=0).abs().numpy()
-            
-            # Normalize importances
-            xgb_importance = xgb_importance / xgb_importance.sum()
-            rf_importance = rf_importance / rf_importance.sum()
-            nn_importance = nn_importance / nn_importance.sum()
-            
-            # Weighted average using tuned weights
-            ensemble_importance = (
-                self.weights[0] * xgb_importance +
-                self.weights[1] * rf_importance +
-                self.weights[2] * nn_importance
-            )
-            
-            return {
-                name: score for name, score in zip(self.feature_names, ensemble_importance)
-            }
-        else:
-            raise ValueError(f"Unsupported importance method: {method}")
-
-    def save_model(self, path):
-        """Save the tuned ensemble model"""
-        model_data = {
-            'weights': self.weights,
-            'thresholds': self.thresholds,
-            'feature_names': self.feature_names,
-            'xgb_model': self.xgb_model,
-            'rf_model': self.rf_model,
-            'nn_model_state': self.nn_model.state_dict(),
-            'input_dim': self.input_dim,
-            'best_params': {
-                'xgboost': self.xgb_model.get_params(),
-                'random_forest': self.rf_model.get_params(),
-                'neural_network': {
-                    k: v for k, v in self.nn_model.state_dict().items()
-                }
-            }
-        }
-        torch.save(model_data, path)
-
-    @classmethod
-    def load_model(cls, path):
-        """Load a tuned ensemble model"""
-        model_data = torch.load(path)
-        
-        # Initialize ensemble
-        ensemble = cls(
-            input_dim=model_data['input_dim'],
-            feature_names=model_data['feature_names'],
-            weights=model_data['weights']
-        )
-        
-        # Load individual models
-        ensemble.xgb_model = model_data['xgb_model']
-        ensemble.rf_model = model_data['rf_model']
-        ensemble.nn_model.load_state_dict(model_data['nn_model_state'])
-        ensemble.thresholds = model_data['thresholds']
-        
-        return ensemble
-
-
+    
 def evaluate_ensemble(ensemble, X, y):
     """Evaluate ensemble model with comprehensive metrics"""
     # Get predictions from each model
@@ -718,7 +630,7 @@ def evaluate_ensemble(ensemble, X, y):
     )
     
     # Calculate threshold-based predictions
-    ensemble_preds = (ensemble_probs >= 0.5).astype(int)
+    ensemble_preds = ensemble.predict(X, optimize_threshold=True, y_true=y)
     
     # Calculate metrics
     metrics = {
@@ -726,9 +638,8 @@ def evaluate_ensemble(ensemble, X, y):
         'accuracy': accuracy_score(y, ensemble_preds),
         'precision': precision_score(y, ensemble_preds),
         'recall': recall_score(y, ensemble_preds),
-        'f1': f1_score(y, ensemble_preds),
-        'confusion_matrix': confusion_matrix(y, ensemble_preds).tolist()
-    }
+        'f1': f1_score(y, ensemble_preds)
+        }
     
     # Calculate individual model metrics
     model_probs = {
@@ -738,7 +649,10 @@ def evaluate_ensemble(ensemble, X, y):
     }
     
     for model_name, probs in model_probs.items():
-        preds = (probs >= 0.5).astype(int)
+        fpr, tpr, thresholds = roc_curve(y, probs)
+        class_weight = 0.55
+        costs = (1 - class_weight) * fpr + (class_weight * (1-tpr))
+        preds = (probs >= thresholds[np.argmin(costs)]).astype(int)
         metrics[f'{model_name}_auc'] = roc_auc_score(y, probs)
         metrics[f'{model_name}_precision'] = precision_score(y, preds)
         metrics[f'{model_name}_recall'] = recall_score(y, preds)
@@ -800,26 +714,26 @@ def create_summary_report(data_stats, metrics, feature_metadata):
     - Test fraud ratio: {data_stats['test_fraud_ratio']:.3%}
     
     Model Performance:
-    - XGBoost AUC: {metrics['test']['xgboost_auc']:.3f}
-    - Random Forest AUC: {metrics['test']['random_forest_auc']:.3f}
-    - Neural Network AUC: {metrics['test']['neural_network_auc']:.3f}
-    - Ensemble AUC: {metrics['test']['auc']:.3f}
-    - XGBoost Recall: {metrics['test']['xgboost_recall']:.3f}
-    - Random Forest Recall: {metrics['test']['random_forest_recall']:.3f}
-    - Neural Network Recall: {metrics['test']['neural_network_recall']:.3f}
-    - Ensemble Recall: {metrics['test']['recall']:.3f}
-    - XGBoost Precsion: {metrics['test']['xgboost_precision']:.3f}
-    - Random Forest Precision: {metrics['test']['random_forest_precision']:.3f}
-    - Neural Network Precision: {metrics['test']['neural_network_precision']:.3f}
-    - Ensemble Precision: {metrics['test']['precision']:.3f}
-    - XGBoost Accuracy: {metrics['test']['xgboost_accuracy']:.3f}
-    - Random Forest Accuracy: {metrics['test']['random_forest_accuracy']:.3f}
-    - Neural Network Accuracy: {metrics['test']['neural_network_accuracy']:.3f}
-    - Ensemble Accuracy: {metrics['test']['accuracy']:.3f}
-    - XGBoost F1: {metrics['test']['xgboost_f1']:.3f}
-    - Random Forest F1: {metrics['test']['random_forest_f1']:.3f}
-    - Neural Network F1: {metrics['test']['neural_network_f1']:.3f}
-    - Ensemble F1: {metrics['test']['f1']:.3f}"
+    - XGBoost AUC: {metrics['Test']['xgboost_auc']:.3f}
+    - Random Forest AUC: {metrics['Test']['random_forest_auc']:.3f}
+    - Neural Network AUC: {metrics['Test']['neural_network_auc']:.3f}
+    - Ensemble AUC: {metrics['Test']['auc']:.3f}
+    - XGBoost Recall: {metrics['Test']['xgboost_recall']:.3f}
+    - Random Forest Recall: {metrics['Test']['random_forest_recall']:.3f}
+    - Neural Network Recall: {metrics['Test']['neural_network_recall']:.3f}
+    - Ensemble Recall: {metrics['Test']['recall']:.3f}
+    - XGBoost Precsion: {metrics['Test']['xgboost_precision']:.3f}
+    - Random Forest Precision: {metrics['Test']['random_forest_precision']:.3f}
+    - Neural Network Precision: {metrics['Test']['neural_network_precision']:.3f}
+    - Ensemble Precision: {metrics['Test']['precision']:.3f}
+    - XGBoost Accuracy: {metrics['Test']['xgboost_accuracy']:.3f}
+    - Random Forest Accuracy: {metrics['Test']['random_forest_accuracy']:.3f}
+    - Neural Network Accuracy: {metrics['Test']['neural_network_accuracy']:.3f}
+    - Ensemble Accuracy: {metrics['Test']['accuracy']:.3f}
+    - XGBoost F1: {metrics['Test']['xgboost_f1']:.3f}
+    - Random Forest F1: {metrics['Test']['random_forest_f1']:.3f}
+    - Neural Network F1: {metrics['Test']['neural_network_f1']:.3f}
+    - Ensemble F1: {metrics['Test']['f1']:.3f}"
     
     Feature Groups:
     {'-' * 40}
@@ -833,7 +747,6 @@ def create_summary_report(data_stats, metrics, feature_metadata):
     with open("training_summary.txt", "w") as f:
         f.write(summary_report)
     mlflow.log_artifact("training_summary.txt")# Define the directory containing the files
-
 
 def train_fraud_detection_system(raw_data, test_size=0.25):
     """Main training function with improved validation and ensemble strategy"""
@@ -932,15 +845,24 @@ def train_fraud_detection_system(raw_data, test_size=0.25):
         
         # Optimize ensemble weights using validation performance
         print("\nOptimizing ensemble weights...")
-        ensemble._optimize_weights(X_val, y_val)
+        optimized_weights = ensemble._optimize_weights(X_val, y_val)
         
         # Evaluate on test set
         print("\nEvaluating on test set...")
         test_metrics = evaluate_ensemble(ensemble, X_test, y_test)
-        metrics['test'] = test_metrics
+        metrics['Test'] = test_metrics
+
+        #Log optimized parameters
+         # Log optimized parameters
+        mlflow.log_params({
+            'final_ensemble_threshold': ensemble.thresholds['ensemble'],
+            'optimized_xgb_weight': optimized_weights[0],
+            'optimized_rf_weight': optimized_weights[1],
+            'optimized_nn_weight': optimized_weights[2]
+        })
         
         # Log final metrics summary
-        mlflow.log_dict(metrics, 'final_metrics.json')
+        mlflow.log_dict(metrics, 'all_metrics.json')
         
         # Prepare model artifacts
         input_example = pd.DataFrame(X_train[:1], columns=feature_names)
@@ -954,13 +876,10 @@ def train_fraud_detection_system(raw_data, test_size=0.25):
         
         # Create and log summary report
         create_summary_report(data_stats, metrics, feature_metadata)
-        
-        
+          
         print("\nTraining completed successfully!")
         print(f"MLflow run ID: {run.info.run_id}")
-        
         return preprocessor, ensemble, metrics
-
 
 directory = '/Workspace/Users/kehinde.awomuti@pwc.com/ccfrauddetection/data'
 # List to store DataFrames
@@ -974,7 +893,7 @@ for filename in os.listdir(directory):
 
 # Concatenate all DataFrames into a single DataFrame
 combined_df = pd.concat(df_list, ignore_index=True)
-pos_df = combined_df[combined_df['TX_FRAUD'] == 1].iloc[:100]
-neg_df = combined_df[combined_df['TX_FRAUD'] == 0].iloc[:10000]
+pos_df = combined_df[combined_df['TX_FRAUD'] == 1].iloc[:50]
+neg_df = combined_df[combined_df['TX_FRAUD'] == 0].iloc[:3000]
 df2 = pd.concat([pos_df, neg_df], ignore_index=True, axis= 0)
 preprocessor, ensemble, metrics = train_fraud_detection_system(combined_df)
