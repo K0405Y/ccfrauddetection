@@ -14,26 +14,26 @@
     - Test fraud ratio: 4.669%
     
     Model Performance:
-    - XGBoost AUC: 0.508
-    - Random Forest AUC: 0.504
-    - Neural Network AUC: 0.504
-    - Ensemble AUC: 0.514
-    - XGBoost Recall: 0.998
-    - Random Forest Recall: 0.994
-    - Neural Network Recall: 1.000
-    - Ensemble Recall: 0.992
-    - XGBoost Precsion: 0.047
-    - Random Forest Precision: 0.047
-    - Neural Network Precision: 0.047
-    - Ensemble Precision: 0.047
-    - XGBoost Accuracy: 0.054
-    - Random Forest Accuracy: 0.054
-    - Neural Network Accuracy: 0.047
-    - Ensemble Accuracy: 0.062
-    - XGBoost F1: 0.090
-    - Random Forest F1: 0.089
-    - Neural Network F1: 0.089
-    - Ensemble F1: 0.090"
+    - XGBoost AUC: 0.505
+    - Random Forest AUC: 0.508
+    - Neural Network AUC: 0.510
+    - Ensemble AUC: 0.508
+    - XGBoost Recall: 0.092
+    - Random Forest Recall: 0.092
+    - Neural Network Recall: 0.054
+    - Ensemble Recall: 0.059
+    - XGBoost Precsion: 0.053
+    - Random Forest Precision: 0.052
+    - Neural Network Precision: 0.053
+    - Ensemble Precision: 0.053
+    - XGBoost Accuracy: 0.880
+    - Random Forest Accuracy: 0.879
+    - Neural Network Accuracy: 0.911
+    - Ensemble Accuracy: 0.906
+    - XGBoost F1: 0.067
+    - Random Forest F1: 0.066
+    - Neural Network F1: 0.053
+    - Ensemble F1: 0.056"
     
     Feature Groups:
     ----------------------------------------

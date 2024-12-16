@@ -452,9 +452,9 @@ model_versions = {
 }
 
 # Initialize and register the final model
-model = FraudDetectionEnsemble(model_versions = model_versions, data_directory='/Workspace/Users/kehinde.awomuti@pwc.com/ccfrauddetection/data')
+model = FraudDetectionEnsemble(model_versions = model_versions, data_directory='/Workspace/Users/**********************/ccfrauddetection/data')
 
-experiment_id = mlflow.set_experiment('/Users/kehinde.awomuti@pwc.com/fraud_detection_inference')
+experiment_id = mlflow.set_experiment('/Users/**********************/fraud_detection_inference')
 # Register the model
 with mlflow.start_run(run_name='inference_engine') as run:
     mlflow.pyfunc.log_model(
