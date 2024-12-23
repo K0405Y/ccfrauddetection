@@ -93,7 +93,7 @@ class FraudDetectionEnsemble:
         self.xgb_model = None
         self.rf_model = None
         self.nn_model = None
-        self.experiment_name = '/Users/***********************/fraud_detection_train'
+        self.experiment_name = '/Users/kehinde.awomuti@pwc.com/fraud_detection_train'
 
     def _optimize_threshold(self, y_true, y_prob, class_weight=0.55, lambda_reg=0.1):
         """Optimize threshold using precision-recall curve and regularization
@@ -866,7 +866,7 @@ def train_fraud_detection_system(raw_data, test_size=0.25):
     )
     
     with mlflow.start_run(run_name="fraud_detection_ensemble", 
-                          experiment_id= mlflow.get_experiment_by_name('/Users/***********************/fraud_detection_train').experiment_id) as run:
+                          experiment_id= mlflow.get_experiment_by_name('/Users/kehinde.awomuti@pwc.com/fraud_detection_train').experiment_id) as run:
         # Log dataset info and feature metadata
         mlflow.log_params(data_stats)
         mlflow.log_dict(feature_metadata, 'feature_metadata.json')
@@ -913,19 +913,12 @@ def train_fraud_detection_system(raw_data, test_size=0.25):
         print(f"MLflow run ID: {run.info.run_id}")
         return preprocessor, ensemble, metrics
 
-directory = '/Workspace/Users/***********************/ccfrauddetection/data'
-# List to store DataFrames
-df_list = []
-# Iterate over files in the directory
-for filename in os.listdir(directory):
-    if filename.endswith('.csv'):
-        file_path = os.path.join(directory, filename)
-        df = pd.read_csv(file_path)
-        df_list.append(df)
+directory = '/Workspace/Users/kehinde.awomuti@pwc.com/ccfrauddetection/data/data.csv'
 
+df = pd.read_csv(directory)
 # Concatenate all DataFrames into a single DataFrame
-combined_df = pd.concat(df_list, ignore_index=True)
-pos_df = combined_df[combined_df['TX_FRAUD'] == 1].iloc[:50]
-neg_df = combined_df[combined_df['TX_FRAUD'] == 0].iloc[:3000]
+# combined_df = pd.concat(df_list, ignore_index=True)
+pos_df = df[df['TX_FRAUD'] == 1].iloc[:50]
+neg_df = df[df['TX_FRAUD'] == 0].iloc[:3000]
 df2 = pd.concat([pos_df, neg_df], ignore_index=True, axis= 0)
-preprocessor, ensemble, metrics = train_fraud_detection_system(combined_df)
+# preprocessor, ensemble, metrics = train_fraud_detection_system(df2)
