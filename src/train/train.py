@@ -55,10 +55,10 @@ class FraudDetectionEnsemble:
         
         # Initialize thresholds
         self.thresholds = {
-            'xgboost': 0.3,
-            'random_forest': 0.3,
-            'neural_network': 0.3,
-            'ensemble': 0.3
+            'xgboost': 0.5,
+            'random_forest': 0.5,
+            'neural_network': 0.,
+            'ensemble': 0.5
         }
         
         # Parameter spaces for tuning
@@ -913,12 +913,17 @@ def train_fraud_detection_system(raw_data, test_size=0.25):
         print(f"MLflow run ID: {run.info.run_id}")
         return preprocessor, ensemble, metrics
 
-directory = '/Workspace/Users/kehinde.awomuti@pwc.com/ccfrauddetection/data/data.csv'
+directory = '/Workspace/Users/kehinde.awomuti@pwc.com/ccfrauddetection/data/'
+df_list = []
+for file in os.listdir(directory):
+    if file.endswith('.csv'):
+        file_path = os.path.join(directory, file)
+        df = pd.read_csv(file_path)
+        df_list.append(df)
 
-df = pd.read_csv(directory)
 # Concatenate all DataFrames into a single DataFrame
-# combined_df = pd.concat(df_list, ignore_index=True)
+df = pd.concat(df_list, ignore_index=True)
 pos_df = df[df['TX_FRAUD'] == 1].iloc[:50]
 neg_df = df[df['TX_FRAUD'] == 0].iloc[:3000]
 df2 = pd.concat([pos_df, neg_df], ignore_index=True, axis= 0)
-# preprocessor, ensemble, metrics = train_fraud_detection_system(df2)
+preprocessor, ensemble, metrics = train_fraud_detection_system(df2)
