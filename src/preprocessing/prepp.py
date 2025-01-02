@@ -2,6 +2,7 @@ import os
 import pandas as pd
 import numpy as np
 import datetime 
+from skleearn.utils import resample
 from sklearn.preprocessing import StandardScaler
 from sklearn.impute import SimpleImputer
 from sklearn.model_selection import train_test_split
@@ -10,33 +11,14 @@ from category_encoders import TargetEncoder
 import warnings
 warnings.filterwarnings('ignore')
 
-
-def convert_to_datetime(self):
-    transactions_df['TX_DATETIME'] = pd.to_datetime(transactions_df['TX_DATETIME'])
-    
-
-def is_weekend(tx_datetime):
-    weekday = tx_datetime.weekday()
-    return weekday >= 5
-        
-# transactions_df['TX_DURING_WEEKEND'] = transactions_df['TX_DATETIME'].apply(is_weekend)
-    
-def is_night(tx_datetime):
-# Get the hour of the transaction
-    tx_hour = tx_datetime.hour
-    # Binary value: 1 if hour less than 6, and 0 otherwise
-    is_night = tx_hour<=6    
-    return int(is_night)
-
-# transactions_df['TX_DURING_NIGHT']= transactions_df['TX_DATETIME'].apply(is_night)
-
 def get_train_test_set(transactions_df,
                        start_date_training,
                        delta_train=7,delta_delay=7,delta_test=7,
-                       sampling_ratio=1.0,
+                       sampling_ratio=0.4,
                        random_state=0):
     
-    start_date_training = datetime.datetime.strptime(start_date_training, "%Y-%m-%d")
+    transactions_df['TX_DATETIME'] = pd.to_datetime(transactions_df['TX_DATETIME'])
+    start_date_training = datetime.datetime.strptime(start_date_training, "%Y-%m-%d %H:%M:%S")
     
     # Get the training set data
     train_df = transactions_df[(transactions_df.TX_DATETIME>=start_date_training) &
@@ -76,21 +58,35 @@ def get_train_test_set(transactions_df,
         
     test_df = pd.concat(test_df)
     
-    # If subsample
-    if sampling_ratio<1:
-        
-        train_df_frauds=train_df[train_df.TX_FRAUD==1].sample(frac=sampling_ratio, random_state=random_state)
-        train_df_genuine=train_df[train_df.TX_FRAUD==0].sample(frac=sampling_ratio, random_state=random_state)
-        train_df=pd.concat([train_df_frauds,train_df_genuine])
-        
-    # Sort data sets by ascending order of transaction ID
-    train_df=train_df.sort_values('TRANSACTION_ID')
-    test_df=test_df.sort_values('TRANSACTION_ID')
+    # Apply SMOTE to the training data
+    print("Applying SMOTE to the training data...")
+    smote = SMOTE(sampling_strategy=sampling_ratio, random_state=random_state)
+    X_train = train_df.drop(columns=['TX_FRAUD'])
+    y_train = train_df['TX_FRAUD']
     
-    return (train_df, test_df)
+    X_train_res, y_train_res = smote.fit_resample(X_train, y_train)
+    
+    # Combine the resampled data
+    train_df_resampled = pd.concat([X_train_res, y_train_res], axis=1)
+    
+    # Sort data sets by ascending order of transaction ID
+    train_df_resampled = train_df_resampled.sort_values('TRANSACTION_ID')
+    test_df = test_df.sort_values('TRANSACTION_ID')
 
+    return (train_df_resampled, test_df)
 
-def get_customer_spending_behaviour_features(customer_transactions, windows_size_in_days=[1,7,30]):
+def is_weekend(tx_datetime):
+    weekday = tx_datetime.weekday()
+    return weekday >= 5
+            
+def is_night(tx_datetime):
+    # Get the hour of the transaction
+    tx_hour = tx_datetime.hour
+    # Binary value: 1 if hour less than 6, and 0 otherwise
+    is_night = tx_hour<=6    
+    return int(is_night)
+
+def get_customer_spending_features(customer_transactions, windows_size_in_days=[1,7,30]):
     # Let us first order transactions chronologically
     customer_transactions = customer_transactions.sort_values('TX_DATETIME')
     
@@ -115,7 +111,6 @@ def get_customer_spending_behaviour_features(customer_transactions, windows_size
         
     # Return the dataframe with the new features
     return customer_transactions
-
 
 def get_count_risk_rolling_window(terminal_transactions, delay_period=7, windows_size_in_days=[1,7,30], feature="TERMINAL_ID"):
     

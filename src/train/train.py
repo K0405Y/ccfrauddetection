@@ -1,8 +1,9 @@
 import sys
 import os
-from src.preprocessing.prep import TransactionPreprocessor
+from src.preprocessing.prepp import get_train_test_set, is_weekend, is_night, get_customer_spending_features, get_count_risk_rolling_window
 import pandas as pd
 import numpy as np
+import datetime 
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import  train_test_split, TimeSeriesSplit
 from sklearn.metrics import roc_auc_score, precision_score, accuracy_score, recall_score, f1_score, confusion_matrix, roc_curve, precision_recall_curve, average_precision_score
@@ -26,38 +27,41 @@ warnings.filterwarnings("ignore")
 class FraudDetectionNNWrapper(mlflow.pyfunc.PythonModel):
     def __init__(self, model):
         self.model = model
-        
+
     def predict(self, context, model_input):
         self.model.eval()
         with torch.no_grad():
             # Convert input to tensor
             if isinstance(model_input, pd.DataFrame):
+                model_input['TX_DURING_WEEKEND'] = model_input['TX_DURING_WEEKEND'].astype(int)
+                model_input = model_input.apply(pd.to_numeric, errors='coerce')
+                model_input = model_input.fillna(0)
+                print(model_input.dtypes)
                 X = torch.tensor(model_input.values, dtype=torch.float32)
             else:
-                X = torch.tensor(model_input, dtype=torch.float32)
-                
+                X = torch.tensor(model_input, dtype=torch.float32)                
             # Get predictions
             outputs = self.model(X)
             # Convert to numpy array with shape (n_samples, 2)
             probabilities = outputs.numpy()
             return probabilities
-            
+                    
 class FraudDetectionEnsemble:
     def __init__(self, input_dim, feature_names=None, weights=[0.4, 0.3, 0.3]):
         # Original initialization
         self.input_dim = input_dim
-        self.feature_names = feature_names or [f'feature_{i}' for i in range(input_dim)]
+        self.feature_names = feature_names 
         self.weights = weights
         
         # Initialize class weights based on original distribution
-        weight_ratio = (1/0.026)  # Based on original class distribution
+        weight_ratio = (1/ 0.008)  # Based on original class distribution
         self.class_weights = {0: 1, 1: weight_ratio}
         
         # Initialize thresholds
         self.thresholds = {
             'xgboost': 0.5,
             'random_forest': 0.5,
-            'neural_network': 0.,
+            'neural_network': 0.5,
             'ensemble': 0.5
         }
         
@@ -93,9 +97,9 @@ class FraudDetectionEnsemble:
         self.xgb_model = None
         self.rf_model = None
         self.nn_model = None
-        self.experiment_name = '/Users/kehinde.awomuti@pwc.com/fraud_detection_train'
+        self.experiment_name = dbutils.widgets.get('MLFLOW_DIR')
 
-    def _optimize_threshold(self, y_true, y_prob, class_weight=0.55, lambda_reg=0.1):
+    def _optimize_threshold(self, y_true, y_prob, class_weight=0.9, lambda_reg=0.1):
         """Optimize threshold using precision-recall curve and regularization
         
         Args:
@@ -156,7 +160,7 @@ class FraudDetectionEnsemble:
             # Get individual model probabilities
             xgb_probs = self.xgb_model.predict_proba(X_val)[:, 1]
             rf_probs = self.rf_model.predict_proba(X_val)[:, 1]
-            nn_probs = self.nn_model(torch.FloatTensor(X_val)).detach().numpy()[:, 1]
+            nn_probs = self.nn_model(torch.FloatTensor(self._preprocess_data(X_val))).detach().numpy()[:, 1]
             
             # Weighted ensemble probabilities
             ensemble_probs = (
@@ -203,12 +207,12 @@ class FraudDetectionEnsemble:
         # Get predictions from each model
         xgb_probs = self.xgb_model.predict_proba(X_val)[:, 1]
         rf_probs = self.rf_model.predict_proba(X_val)[:, 1]
-        nn_probs = self.nn_model(torch.FloatTensor(X_val)).detach().numpy()[:, 1]
+        nn_probs = self.nn_model(torch.FloatTensor(self._preprocess_data(X_val))).detach().numpy()[:, 1]
         
         # Optimize individual model thresholds
         self.thresholds['xgboost'], _ = self._optimize_threshold(y_val, xgb_probs)
         self.thresholds['random_forest'], _ = self._optimize_threshold(y_val, rf_probs)
-        self.thresholds['neural_network'], _ = self._optimize_threshold(y_val, nn_probs)
+        self.thresholds['neural_network'], _ = self._optimize_threshold(torch.FloatTensor(y_val), nn_probs)
         
         # Calculate ensemble probabilities
         ensemble_probs = (
@@ -259,7 +263,7 @@ class FraudDetectionEnsemble:
             
             def forward(self, x):
                 logits = self.model(x)
-                return nn.functional.softmax(logits, dim=1)
+                return nn.functional.sigmoid(logits)
         
         return CustomNN(
             self.input_dim,
@@ -275,7 +279,7 @@ class FraudDetectionEnsemble:
                               mlflow.get_experiment_by_name(self.experiment_name).experiment_id):
             best_score = -float('inf')
             best_params = None
-            best_threshold = 0.3
+            best_threshold = 0.5
             
             tscv = TimeSeriesSplit(n_splits=3)
             
@@ -335,7 +339,7 @@ class FraudDetectionEnsemble:
                               mlflow.get_experiment_by_name(self.experiment_name).experiment_id):
             best_score = -float('inf')
             best_params = None
-            best_threshold = 0.3
+            best_threshold = 0.5
             
             tscv = TimeSeriesSplit(n_splits=3)
             
@@ -387,6 +391,16 @@ class FraudDetectionEnsemble:
             )
             
             return best_params
+    
+    def _preprocess_data(self, data):
+        """Preprocess input data to ensure compatibility with PyTorch"""
+        if isinstance(data, pd.DataFrame):
+            data = data.apply(pd.to_numeric, errors='coerce').fillna(0).to_numpy(dtype=np.float32)
+        elif isinstance(data, np.ndarray):
+            data = np.nan_to_num(data, nan=0.0).astype(np.float32)
+        else:
+            raise ValueError("Unsupported data type. Expected DataFrame or ndarray.")
+        return data
 
     def _tune_neural_network(self, X_train, y_train, X_val, y_val):
         """Tune Neural Network with MLFlow tracking"""
@@ -396,7 +410,7 @@ class FraudDetectionEnsemble:
                               mlflow.get_experiment_by_name(self.experiment_name).experiment_id):
             best_score = -float('inf')
             best_params = None
-            best_threshold = 0.3
+            best_threshold = 0.5
             best_state_dict = None
             
             tscv = TimeSeriesSplit(n_splits=3)
@@ -409,10 +423,14 @@ class FraudDetectionEnsemble:
                     X_cv_train, X_cv_val = X_train[train_idx], X_train[val_idx]
                     y_cv_train, y_cv_val = y_train[train_idx], y_train[val_idx]
                     
+                    X_cv_train = self._preprocess_data(X_cv_train)
+                    X_cv_val = self._preprocess_data(X_cv_val)
+
                     model = self._create_nn_model(params)
                     X_cv_train_tensor = torch.FloatTensor(X_cv_train)
                     y_cv_train_tensor = torch.LongTensor(y_cv_train)
                     X_cv_val_tensor = torch.FloatTensor(X_cv_val)
+                    y_cv_val_tensor = torch.LongTensor(y_cv_val)
                     
                     criterion = nn.CrossEntropyLoss(
                         weight=torch.FloatTensor([1, self.class_weights[1]])
@@ -485,7 +503,7 @@ class FraudDetectionEnsemble:
         # Get predictions from each model
         xgb_probs = self.xgb_model.predict_proba(X)[:, 1]
         rf_probs = self.rf_model.predict_proba(X)[:, 1]
-        nn_probs = self.nn_model(torch.FloatTensor(X)).detach().numpy()[:, 1]
+        nn_probs = self.nn_model(torch.FloatTensor(self._preprocess_data(X))).detach().numpy()[:, 1]
         
         # Individual model metrics
         metrics = {}
@@ -525,7 +543,7 @@ class FraudDetectionEnsemble:
 
     def predict_proba(self, X):
         """Get probability predictions with optimized weights"""
-        X_tensor = torch.FloatTensor(X)
+        X_tensor = torch.FloatTensor(self._preprocess_data(X))
         
         # Get predictions from each model
         xgb_probs = self.xgb_model.predict_proba(X)[:, 1]
@@ -541,7 +559,7 @@ class FraudDetectionEnsemble:
         
         return np.vstack((1 - weighted_probs, weighted_probs)).T
 
-    def predict(self, X, threshold=None, optimize_threshold=False, y_true=None, class_weight = 0.55):
+    def predict(self, X, threshold=None, optimize_threshold=False, y_true=None, class_weight = 0.9):
         """Get class predictions using optimized weights and thresholds"""
         probas = self.predict_proba(X)
         
@@ -579,13 +597,16 @@ class FraudDetectionEnsemble:
             
             # Tune individual models
             print("\nTuning individual models...")
+            nn_params = self._tune_neural_network(X_train, y_train, X_val, y_val)
             xgb_params = self._tune_xgboost(X_train, y_train, X_val, y_val)
             rf_params = self._tune_random_forest(X_train, y_train, X_val, y_val)
-            nn_params = self._tune_neural_network(X_train, y_train, X_val, y_val)
             
             # Train final models with best parameters
             print("\nTraining final models with best parameters...")
             
+            # Neural Network (already trained in tuning)
+            self.nn_model.eval()
+
             # XGBoost
             self.xgb_model.fit(
                 X_train, y_train,
@@ -597,8 +618,6 @@ class FraudDetectionEnsemble:
             # Random Forest
             self.rf_model.fit(X_train, y_train)
             
-            # Neural Network (already trained in tuning)
-            self.nn_model.eval()
             
             # Optimize ensemble weights
             print("\nOptimizing ensemble weights...")
@@ -643,7 +662,7 @@ def evaluate_ensemble(ensemble, X, y):
     # Get individual model probabilities
     xgb_probs = ensemble.xgb_model.predict_proba(X)[:, 1]
     rf_probs = ensemble.rf_model.predict_proba(X)[:, 1]
-    nn_probs = ensemble.nn_model(torch.FloatTensor(X)).detach().numpy()[:, 1]
+    nn_probs = ensemble.nn_model(torch.FloatTensor(ensemble._preprocess_data(X))).detach().numpy()[:, 1]
     
     # Get ensemble probabilities
     ensemble_probs = (
@@ -690,8 +709,7 @@ def evaluate_ensemble(ensemble, X, y):
             f'{model_name}_f1': f1_score(y, preds),
             f'{model_name}_accuracy': accuracy_score(y, preds),
             f'{model_name}_threshold': threshold
-        })
-    
+        })   
     return metrics
 
 def log_models(ensemble, signature, input_example):
@@ -729,12 +747,11 @@ def log_models(ensemble, signature, input_example):
         registered_model_name="fd_torch"
     )
 
-def create_summary_report(data_stats, metrics, feature_metadata):
+def create_summary_report(data_stats, metrics):
     """Create comprehensive training summary report"""
     summary_report = f"""
     Fraud Detection Training Summary
-    ==============================
-    
+    ==============================   
     Dataset Statistics:
     - Total samples: {data_stats['total_samples']:,}
     - Training samples: {data_stats['training_samples']:,}
@@ -768,79 +785,47 @@ def create_summary_report(data_stats, metrics, feature_metadata):
     - Neural Network F1: {metrics['Test']['neural_network_f1']:.3f}
     - Ensemble F1: {metrics['Test']['f1']:.3f}"
     
-    Feature Groups:
-    {'-' * 40}
     """   
-    for group, metadata in feature_metadata.items():
-        summary_report += f"\n- {group}: {metadata['feature_count']} features"
-        summary_report += f"\n  Scaler: {metadata['scaler_type']}"
-        summary_report += f"\n  Imputation: {metadata['imputer_strategy']}"
-    
     with open("training_summary.txt", "w") as f:
         f.write(summary_report)
     mlflow.log_artifact("training_summary.txt")
 
-def train_fraud_detection_system(raw_data, test_size=0.25):
+def train_fraud_detection_system(raw_data):
     """Main training function with validation and ensemble strategy"""
     print("Starting fraud detection system training...")
+        
+    #split data 
+    train_df, test_df = get_train_test_set(raw_data, start_date_training=raw_data['TX_DATETIME'].min(), delta_train=14, delta_delay=7, delta_test=14)
     
-    # Initialize preprocessor
-    preprocessor = TransactionPreprocessor()
+    def prep_data(df):
+        df['TX_DURING_WEEKEND'] = df['TX_DATETIME'].apply(is_weekend)
+        df['TX_DURING_NIGHT'] = df['TX_DATETIME'].apply(is_night)
+        df = df.groupby('CUSTOMER_ID').apply(lambda x: get_customer_spending_features(x, windows_size_in_days=[1, 7, 30]))
+        df = df.sort_values('TX_DATETIME').reset_index(drop=True)
+        df = df.groupby('TERMINAL_ID').apply(lambda x: get_count_risk_rolling_window(x, delay_period=7, windows_size_in_days=[1, 7, 30], feature="TERMINAL_ID"))
+        df = df.sort_values('TX_DATETIME').reset_index(drop=True)
+        features = df.drop(['TX_DATETIME', 'TX_FRAUD', 'TX_FRAUD_SCENARIO'], axis=1).columns.to_list()
+        X = df.drop(['TX_DATETIME', 'TX_FRAUD', 'TX_FRAUD_SCENARIO'], axis=1).to_numpy()
+        y = df['TX_FRAUD'].to_numpy()
+        return X, y, features
     
-    # Convert TX_DATETIME to datetime format before validation
-    try:
-        raw_data['TX_DATETIME'] = pd.to_datetime(raw_data['TX_DATETIME'])
-    except Exception as e:
-        print(f"Error converting TX_DATETIME to datetime format: {str(e)}")
-        raw_data['TX_DATETIME'] = pd.to_datetime(raw_data['TX_DATETIME'], format='%Y-%m-%d %H:%M:%S')
-    
-    # Validate input data first
-    print("Validating input data...")
-    issues = preprocessor.validate_features(raw_data)
-    if issues:
-        print("Data validation issues found:")
-        for issue in issues:
-            print(f"- {issue}")
-        raise ValueError("Data validation failed. Please fix the issues before proceeding.")
-    
-    print("Preprocessing data and engineering features...")
+    print("Preprocessing training data...")
+    X_train, y_train, train_features = prep_data(train_df)
 
-    # Get feature names and metadata
-    feature_names = preprocessor.get_feature_names()
-    feature_metadata = preprocessor.get_feature_metadata()
-    
-    # Sort by time and create time-based split
-    raw_data['TX_DATETIME'] = pd.to_datetime(raw_data['TX_DATETIME'])
-    raw_data = raw_data.sort_values('TX_DATETIME')
-    
-    # Use time-based split with validation buffer
-    train_end_date = raw_data['TX_DATETIME'].quantile(0.6)
-    val_start_date = raw_data['TX_DATETIME'].quantile(0.6)
-    val_end_date = raw_data['TX_DATETIME'].quantile(0.8)
-    test_start_date = raw_data['TX_DATETIME'].quantile(0.8)
-    
-    train_data = raw_data[raw_data['TX_DATETIME'] <= train_end_date]
-    val_data = raw_data[(raw_data['TX_DATETIME'] > val_start_date) & 
-                        (raw_data['TX_DATETIME'] <= val_end_date)]
-    test_data = raw_data[raw_data['TX_DATETIME'] > test_start_date]
-    
-    # Process data for each split
-    print("\nProcessing training data...")
-    feature_groups_train, y_train_resampled = preprocessor.transform(train_data, training=True)
-    
-    print("Processing validation data...")
-    feature_groups_val = preprocessor.transform(val_data, training=False)
-    y_val = val_data['TX_FRAUD'].values
-    
-    print("Processing test data...")
-    feature_groups_test = preprocessor.transform(test_data, training=False)
-    y_test = test_data['TX_FRAUD'].values
-    
-    # Convert feature groups to numpy arrays
-    X_train = np.concatenate([feature_groups_train[group] for group in preprocessor.feature_groups.keys()], axis=1)
-    X_val = np.concatenate([feature_groups_val[group] for group in preprocessor.feature_groups.keys()], axis=1)
-    X_test = np.concatenate([feature_groups_test[group] for group in preprocessor.feature_groups.keys()], axis=1)
-    
+    print("Preprocessing validation data...")
+    grouped = test_df.groupby('TX_FRAUD')
+    test_df_final, val_df = [], []
+    for _, group in grouped:
+        mid = len(group) // 2
+        test_df_final.append(group.iloc[:mid])
+        val_df.append(group.iloc[mid:])
+    test_df_final = pd.concat(test_df_final, axis=0).reset_index(drop=True)
+    val_df = pd.concat(val_df, axis=0).reset_index(drop=True)
+    X_val, y_val, val_features = prep_data(val_df)
+
+    print("Preprocessing test data...")
+    X_test, y_test, test_features = prep_data(test_df_final)
+
     # Print and log data statistics
     print("\nData Statistics:")
     data_stats = {
@@ -850,7 +835,7 @@ def train_fraud_detection_system(raw_data, test_size=0.25):
         'test_samples': len(X_test),
         'feature_dimension': X_train.shape[1],
         'original_fraud_ratio': float(raw_data['TX_FRAUD'].mean()),
-        'training_fraud_ratio': float(y_train_resampled.mean()),
+        'training_fraud_ratio': float(y_train.mean()),
         'validation_fraud_ratio': float(y_val.mean()),
         'test_fraud_ratio': float(y_test.mean())
     }
@@ -860,20 +845,22 @@ def train_fraud_detection_system(raw_data, test_size=0.25):
     
     # Initialize ensemble with dynamic weight optimization
     print("\nInitializing ensemble model...")
+
+    feature_names = train_features
     ensemble = FraudDetectionEnsemble(
         input_dim=X_train.shape[1],
         feature_names=feature_names
     )
     
+    exp = dbutils.widgets.get('MLFLOW_DIR')
     with mlflow.start_run(run_name="fraud_detection_ensemble", 
-                          experiment_id= mlflow.get_experiment_by_name('/Users/kehinde.awomuti@pwc.com/fraud_detection_train').experiment_id) as run:
-        # Log dataset info and feature metadata
+                          experiment_id= mlflow.get_experiment_by_name(exp).experiment_id) as run:
+        # Log dataset info 
         mlflow.log_params(data_stats)
-        mlflow.log_dict(feature_metadata, 'feature_metadata.json')
         
         # Train ensemble with validation monitoring
         print("\nTraining ensemble...")
-        metrics = ensemble.train(X_train, y_train_resampled, X_val, y_val)
+        metrics = ensemble.train(X_train, y_train, X_val, y_val)
         
         # Optimize ensemble weights using validation performance
         print("\nOptimizing ensemble weights...")
@@ -884,8 +871,7 @@ def train_fraud_detection_system(raw_data, test_size=0.25):
         test_metrics = evaluate_ensemble(ensemble, X_test, y_test)
         metrics['Test'] = test_metrics
 
-        #Log optimized parameters
-         # Log optimized parameters
+        # Log optimized parameters
         mlflow.log_params({
             'final_ensemble_threshold': ensemble.thresholds['ensemble'],
             'optimized_xgb_weight': optimized_weights[0],
@@ -902,18 +888,18 @@ def train_fraud_detection_system(raw_data, test_size=0.25):
             X_train, 
             ensemble.xgb_model.predict_proba(X_train)
         )
-        
+
         # Log individual models
         log_models(ensemble, signature, input_example)
         
         # Create and log summary report
-        create_summary_report(data_stats, metrics, feature_metadata)
+        create_summary_report(data_stats, metrics)
           
         print("\nTraining completed successfully!")
         print(f"MLflow run ID: {run.info.run_id}")
-        return preprocessor, ensemble, metrics
-
-directory = '/Workspace/Users/kehinde.awomuti@pwc.com/ccfrauddetection/data/'
+        return ensemble, metrics
+    
+directory = dbutils.widgets.get('DIR_NAME')
 df_list = []
 for file in os.listdir(directory):
     if file.endswith('.csv'):
@@ -923,7 +909,5 @@ for file in os.listdir(directory):
 
 # Concatenate all DataFrames into a single DataFrame
 df = pd.concat(df_list, ignore_index=True)
-pos_df = df[df['TX_FRAUD'] == 1].iloc[:50]
-neg_df = df[df['TX_FRAUD'] == 0].iloc[:3000]
-df2 = pd.concat([pos_df, neg_df], ignore_index=True, axis= 0)
-preprocessor, ensemble, metrics = train_fraud_detection_system(df2)
+df = df.drop(df.columns[0], axis=1)
+ensemble, metrics = train_fraud_detection_system(df)

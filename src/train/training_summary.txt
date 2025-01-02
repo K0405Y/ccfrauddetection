@@ -1,55 +1,37 @@
 
     Fraud Detection Training Summary
-    ==============================
-    
+    ==============================   
     Dataset Statistics:
-    - Total samples: 3,050
-    - Training samples: 2,180
-    - Validation samples: 610
-    - Test samples: 610
-    - Feature dimension: 37
-    - Original fraud ratio: 1.639%
-    - Training fraud ratio: 16.651%
-    - Validation fraud ratio: 0.984%
-    - Test fraud ratio: 5.082%
+    - Total samples: 1,754,155
+    - Training samples: 28,819
+    - Validation samples: 14,167
+    - Test samples: 14,165
+    - Feature dimension: 20
+    - Original fraud ratio: 0.837%
+    - Training fraud ratio: 0.108%
+    - Validation fraud ratio: 0.346%
+    - Test fraud ratio: 0.339%
     
     Model Performance:
-    - XGBoost AUC: 0.519
-    - Random Forest AUC: 0.534
+    - XGBoost AUC: 0.666
+    - Random Forest AUC: 0.642
     - Neural Network AUC: 0.500
-    - Ensemble AUC: 0.533
-    - XGBoost Recall: 0.677
-    - Random Forest Recall: 0.677
+    - Ensemble AUC: 0.645
+    - XGBoost Recall: 0.375
+    - Random Forest Recall: 0.229
     - Neural Network Recall: 1.000
-    - Ensemble Recall: 0.677
-    - XGBoost Precsion: 0.067
-    - Random Forest Precision: 0.074
-    - Neural Network Precision: 0.051
-    - Ensemble Precision: 0.072
-    - XGBoost Accuracy: 0.505
-    - Random Forest Accuracy: 0.551
-    - Neural Network Accuracy: 0.051
-    - Ensemble Accuracy: 0.543
-    - XGBoost F1: 0.122
-    - Random Forest F1: 0.133
-    - Neural Network F1: 0.097
-    - Ensemble F1: 0.131"
+    - Ensemble Recall: 0.396
+    - XGBoost Precsion: 0.138
+    - Random Forest Precision: 0.282
+    - Neural Network Precision: 0.003
+    - Ensemble Precision: 0.129
+    - XGBoost Accuracy: 0.990
+    - Random Forest Accuracy: 0.995
+    - Neural Network Accuracy: 0.003
+    - Ensemble Accuracy: 0.989
+    - XGBoost F1: 0.202
+    - Random Forest F1: 0.253
+    - Neural Network F1: 0.007
+    - Ensemble F1: 0.195"
     
-    Feature Groups:
-    ----------------------------------------
     
-- temporal: 7 features
-  Scaler: StandardScaler
-  Imputation: median
-- amount: 7 features
-  Scaler: RobustScaler
-  Imputation: median
-- customer: 4 features
-  Scaler: StandardScaler
-  Imputation: median
-- terminals: 8 features
-  Scaler: StandardScaler
-  Imputation: median
-- sequence: 11 features
-  Scaler: RobustScaler
-  Imputation: median
