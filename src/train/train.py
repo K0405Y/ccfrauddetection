@@ -99,7 +99,7 @@ class FraudDetectionEnsemble:
         self.nn_model = None
         self.experiment_name = dbutils.widgets.get('MLFLOW_DIR')
 
-    def _optimize_threshold(self, y_true, y_prob, class_weight=0.9, lambda_reg=0.1):
+    def _optimize_threshold(self, y_true, y_prob, class_weight=0.9, lambda_reg=0.2):
         """Optimize threshold using precision-recall curve and regularization
         
         Args:
@@ -353,7 +353,7 @@ class FraudDetectionEnsemble:
                     
                     model = RandomForestClassifier(
                         **params,
-                        class_weight='balanced_subsample',
+                        class_weight= self.class_weights,
                         n_jobs=-1,
                         random_state=0,
                         criterion = 'log_loss'
@@ -795,7 +795,7 @@ def train_fraud_detection_system(raw_data):
     print("Starting fraud detection system training...")
         
     #split data 
-    train_df, test_df = get_train_test_set(raw_data, start_date_training=raw_data['TX_DATETIME'].min(), delta_train=14, delta_delay=7, delta_test=14)
+    train_df, test_df = get_train_test_set(raw_data, start_date_training=raw_data['TX_DATETIME'].min(), delta_train=7, delta_delay=3, delta_test=7)
     
     def prep_data(df):
         df['TX_DURING_WEEKEND'] = df['TX_DATETIME'].apply(is_weekend)
@@ -898,7 +898,8 @@ def train_fraud_detection_system(raw_data):
         print("\nTraining completed successfully!")
         print(f"MLflow run ID: {run.info.run_id}")
         return ensemble, metrics
-    
+
+#import source data    
 directory = dbutils.widgets.get('DIR_NAME')
 df_list = []
 for file in os.listdir(directory):

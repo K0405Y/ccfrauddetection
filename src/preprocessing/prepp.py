@@ -2,7 +2,7 @@ import os
 import pandas as pd
 import numpy as np
 import datetime 
-from skleearn.utils import resample
+from sklearn.utils import resample
 from sklearn.preprocessing import StandardScaler
 from sklearn.impute import SimpleImputer
 from sklearn.model_selection import train_test_split
@@ -14,7 +14,7 @@ warnings.filterwarnings('ignore')
 def get_train_test_set(transactions_df,
                        start_date_training,
                        delta_train=7,delta_delay=7,delta_test=7,
-                       sampling_ratio=0.4,
+                       sampling_ratio=0.8,
                        random_state=0):
     
     transactions_df['TX_DATETIME'] = pd.to_datetime(transactions_df['TX_DATETIME'])
@@ -61,7 +61,9 @@ def get_train_test_set(transactions_df,
     # Apply SMOTE to the training data
     print("Applying SMOTE to the training data...")
     smote = SMOTE(sampling_strategy=sampling_ratio, random_state=random_state)
-    X_train = train_df.drop(columns=['TX_FRAUD'])
+    #Exclude datetime columns from SMOTE
+    datetime_columns = ['TX_DATETIME']
+    X_train = train_df.drop(columns=['TX_FRAUD'] + datetime_columns)
     y_train = train_df['TX_FRAUD']
     
     X_train_res, y_train_res = smote.fit_resample(X_train, y_train)
@@ -69,10 +71,14 @@ def get_train_test_set(transactions_df,
     # Combine the resampled data
     train_df_resampled = pd.concat([X_train_res, y_train_res], axis=1)
     
+    # Reintegrate datetime columns
+    train_df_resampled = pd.concat([train_df_resampled, train_df[datetime_columns].reset_index(drop=True)], axis=1)
+    train_df_resampled['TX_DATETIME'] = train_df_resampled['TX_DATETIME'].fillna(method='ffill')
+
     # Sort data sets by ascending order of transaction ID
     train_df_resampled = train_df_resampled.sort_values('TRANSACTION_ID')
     test_df = test_df.sort_values('TRANSACTION_ID')
-
+    
     return (train_df_resampled, test_df)
 
 def is_weekend(tx_datetime):
