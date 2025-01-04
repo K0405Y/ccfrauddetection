@@ -7,6 +7,5 @@
             "colsample_bytree": [0.7, 0.8],
             "gamma": [0.5, 1],
             "reg_alpha": [0.5, 1],
-            "reg_lambda": [1, 2],
-            "scale_pos_weight": [0.5] 
+            "reg_lambda": [1, 2]
 }

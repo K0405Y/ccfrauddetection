@@ -25,36 +25,45 @@ class FraudDetectionXGBoost:
         self.xgb_model = None
         self.experiment_name = dbutils.widgets.get('MLFLOW_DIR')
 
+    def _calculate_class_weight(self, y):
+        """
+        Calculate class weights based on class distribution
+        """
+        class_counts = np.bincount(y)
+        total_samples = len(y)
+        weights = {
+            0: total_samples / (2 * class_counts[0]),
+            1: total_samples / (2 * class_counts[1])
+        }
+        return weights
+    
     def _optimize_threshold(self, y_true, y_prob):
-        # Get precision-recall curve
-        precision, recall, thresholds = precision_recall_curve(y_true, y_prob, pos_label=1)
-        thresholds = np.append(thresholds, 1)
+        """
+        Optimize threshold to maximize recall while maintaining precision >= 80%
+        """
+        precisions, recalls, thresholds = precision_recall_curve(y_true, y_prob)
+        # Add the endpoint (1.0) since precision_recall_curve doesn't include it
+        thresholds = np.append(thresholds, 1.0)
         
-        # Calculate AUC-PR for each threshold
-        auc_pr_values = []
-        
-        # Start from index 1 to ensure at least 2 points
-        for i in range(1, len(thresholds)):
-            try:
-                precision_i = precision[:i+1]
-                recall_i = recall[:i+1]
-                
-                # Ensure we have at least 2 unique points
-                if len(np.unique(recall_i)) > 1:
-                    auc_pr = auc(recall_i, precision_i)
-                    auc_pr_values.append(auc_pr)
-                else:
-                    auc_pr_values.append(0.0)
-            except ValueError:
-                auc_pr_values.append(0.0)
-        
-        # If we couldn't compute any valid AUC values, return a default threshold
-        if not auc_pr_values or max(auc_pr_values) == 0:
-            return 0.5
+        valid_points = precisions >= 0.75       
+        if not np.any(valid_points):
+            print("Warning: No threshold achieves base precision. Using highest precision threshold.")
+            best_idx = np.argmax(precisions)
+        else:
+            # Among points with sufficient precision, maximize recall
+            valid_recalls = recalls[valid_points]
+            valid_thresholds = thresholds[valid_points]
             
-        # Find the threshold that maximizes AUC-PR
-        optimal_idx = np.argmax(auc_pr_values) + 1  # Add 1 because we started from index 1
-        return thresholds[optimal_idx]
+            best_idx = np.argmax(valid_recalls)
+            threshold = valid_thresholds[best_idx]
+
+            print(f"\nAt selected threshold:")
+            print(f"Precision: {precisions[valid_points][best_idx]:.4f}")
+            print(f"Recall: {valid_recalls[best_idx]:.4f}")
+            
+            return threshold
+            
+        return thresholds[best_idx]
 
     def _generate_param_combinations(self):
         param_names = list(self.param_space.keys())
@@ -63,6 +72,11 @@ class FraudDetectionXGBoost:
 
     def _tune_xgboost(self, X_train, y_train, X_val, y_val):
         print("\nTuning XGBoost hyperparameters...")
+
+        # Calculate class weights
+        class_weights = self._calculate_class_weight(y_train)
+        sample_weights = np.array([class_weights[y] for y in y_train])
+
         with mlflow.start_run(nested=True, run_name="xgboost_tuning", experiment_id=
                               mlflow.get_experiment_by_name(self.experiment_name).experiment_id):
             best_score = -float('inf')
@@ -80,34 +94,59 @@ class FraudDetectionXGBoost:
                     model = xgb.XGBClassifier(
                         **params,
                         tree_method='hist',
-                        eval_metric=['aucpr']
+                        eval_metric=['aucpr'],
+                        scale_pos_weight = class_weights[1]/class_weights[0]
                     )
                     model.fit(
                         X_cv_train, y_cv_train,
+                        sample_weight=sample_weights,
                         eval_set=[(X_cv_val, y_cv_val)],
                         early_stopping_rounds=30,
                         verbose=False
                     )
                     y_pred_proba = model.predict_proba(X_cv_val)[:, 1]
-                    cv_scores.append(roc_auc_score(y_cv_val, y_pred_proba))
+
+                    # Find optimal threshold for this fold
+                    precisions, recalls, thresholds = precision_recall_curve(y_cv_val, y_pred_proba)
+                    valid_points = precisions >= 0.75
+                    if np.any(valid_points):
+                        valid_recalls = recalls[valid_points]
+                        max_recall = np.max(valid_recalls)
+                        cv_scores.append(max_recall)
+                    else:
+                        cv_scores.append(0.0)  # Penalize if can't achieve desired precision
+                
                 mean_score = np.mean(cv_scores)
                 if mean_score > best_score:
                     best_score = mean_score
                     best_params = params
+            
             mlflow.log_params(best_params)
-            self.xgb_model = xgb.XGBClassifier(**best_params, tree_method='hist')
+            # Initialize model with best parameters and class weights
+            self.xgb_model = xgb.XGBClassifier(
+                **best_params,
+                tree_method='hist',
+                scale_pos_weight=class_weights[1]/class_weights[0]
+            )
 
     def train(self, X_train, y_train, X_val, y_val):
         print("\nTraining XGBoost model...")
         self._tune_xgboost(X_train, y_train, X_val, y_val)
+
+        class_weights = self._calculate_class_weight(y_train)
+        sample_weights = np.array([class_weights[y] for y in y_train])
+
         self.xgb_model.fit(
             X_train, y_train,
+            sample_weight=sample_weights,
             eval_set=[(X_val, y_val)],
             early_stopping_rounds=30,
             verbose=False
         )
+        #optimize threshold on validation set
         y_val_pred = self.xgb_model.predict_proba(X_val)[:, 1]
         self.threshold = self._optimize_threshold(y_val, y_val_pred)
+        print(f"\nOptimized threshold: {self.threshold:.4f}")
 
     def evaluate(self, X, y):
         y_prob = self.xgb_model.predict_proba(X)[:, 1]

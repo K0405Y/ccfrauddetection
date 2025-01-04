@@ -8,7 +8,6 @@ warnings.filterwarnings('ignore')
 def get_train_test_set(transactions_df,
                        start_date_training,
                        delta_train=7, delta_delay=7, delta_test=7,
-                       sampling_ratio=1,
                        random_state=0):
     """
     Prepare train and test datasets for fraud detection.
@@ -46,24 +45,7 @@ def get_train_test_set(transactions_df,
     
     test_df = pd.concat(test_df)
     
-    # Apply SMOTE to balance the training data
-    print("Applying SMOTE to the training data...")
-    smote = SMOTE(sampling_strategy=sampling_ratio, random_state=random_state)
-    datetime_columns = ['TX_DATETIME']  # Exclude datetime columns for SMOTE
-    X_train = train_df.drop(columns=['TX_FRAUD'] + datetime_columns)
-    y_train = train_df['TX_FRAUD']
-    
-    # Resample the training data
-    X_train_res, y_train_res = smote.fit_resample(X_train, y_train)
-    train_df_resampled = pd.concat([X_train_res, y_train_res], axis=1)
-    
-    # Re-add datetime columns and sort datasets
-    train_df_resampled = pd.concat([train_df_resampled, train_df[datetime_columns].reset_index(drop=True)], axis=1)
-    train_df_resampled['TX_DATETIME'] = train_df_resampled['TX_DATETIME'].fillna(method='ffill')
-    train_df_resampled = train_df_resampled.sort_values('TRANSACTION_ID')
-    test_df = test_df.sort_values('TRANSACTION_ID')
-    
-    return train_df_resampled, test_df
+    return train_df, test_df
 
 def is_weekend(tx_datetime):
     """
