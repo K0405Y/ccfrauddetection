@@ -3,35 +3,35 @@
     ==============================   
     Dataset Statistics:
     - Total samples: 1,754,155
-    - Training samples: 120,310
-    - Validation samples: 32,209
-    - Test samples: 32,209
+    - Training samples: 57,576
+    - Validation samples: 14,167
+    - Test samples: 14,165
     - Feature dimension: 20
     - Original fraud ratio: 0.837%
-    - Training fraud ratio: 44.444%
-    - Validation fraud ratio: 0.357%
-    - Test fraud ratio: 0.357%
+    - Training fraud ratio: 50.000%
+    - Validation fraud ratio: 0.346%
+    - Test fraud ratio: 0.339%
     
     Model Performance:
-    - XGBoost AUC: 0.722
-    - Random Forest AUC: 0.704
+    - XGBoost AUC: 0.690
+    - Random Forest AUC: 0.743
     - Neural Network AUC: 0.500
-    - Ensemble AUC: 0.702
-    - XGBoost Recall: 0.357
-    - Random Forest Recall: 0.348
+    - Ensemble AUC: 0.739
+    - XGBoost Recall: 0.021
+    - Random Forest Recall: 0.188
     - Neural Network Recall: 1.000
-    - Ensemble Recall: 0.339
-    - XGBoost Precsion: 0.086
-    - Random Forest Precision: 0.120
-    - Neural Network Precision: 0.004
-    - Ensemble Precision: 0.257
-    - XGBoost Accuracy: 0.984
-    - Random Forest Accuracy: 0.989
-    - Neural Network Accuracy: 0.004
-    - Ensemble Accuracy: 0.994
-    - XGBoost F1: 0.139
-    - Random Forest F1: 0.179
+    - Ensemble Recall: 0.062
+    - XGBoost Precsion: 0.019
+    - Random Forest Precision: 0.900
+    - Neural Network Precision: 0.003
+    - Ensemble Precision: 0.750
+    - XGBoost Accuracy: 0.993
+    - Random Forest Accuracy: 0.997
+    - Neural Network Accuracy: 0.003
+    - Ensemble Accuracy: 0.997
+    - XGBoost F1: 0.020
+    - Random Forest F1: 0.310
     - Neural Network F1: 0.007
-    - Ensemble F1: 0.292"
+    - Ensemble F1: 0.115"
     
     

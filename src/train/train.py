@@ -54,8 +54,8 @@ class FraudDetectionEnsemble:
         self.weights = weights
         
         # Initialize class weights based on original distribution
-        weight_ratio = (1/ 0.008)  # Based on original class distribution
-        self.class_weights = {0: 1, 1: weight_ratio}
+        weight_ratio = 0.5
+        self.class_weights = {0: 1, 1: (1/weight_ratio)}
         
         # Initialize thresholds
         self.thresholds = {
@@ -68,9 +68,9 @@ class FraudDetectionEnsemble:
         # Parameter spaces for tuning
         self.param_space = {
             'xgboost': {
-                'max_depth': [3, 4, 5],
-                'learning_rate': [0.01, 0.05],
-                'n_estimators': [300, 500],
+                'max_depth': [5, 6, 8],
+                'learning_rate': [0.001, 0.005, 0.01],
+                'n_estimators': [200, 300, 400, 500],
                 'min_child_weight': [5, 10],
                 'subsample': [0.7, 0.8],
                 'colsample_bytree': [0.7, 0.8],
@@ -80,13 +80,17 @@ class FraudDetectionEnsemble:
                 'scale_pos_weight': [weight_ratio] 
             },
             'random_forest': {
-                'n_estimators': [200, 300],
-                'max_depth': [4, 6],
-                'min_samples_leaf': [2, 4],
-                'min_samples_split': [5, 10]
+                'n_estimators': [200, 300, 400, 500],
+                'max_depth': [4, 6, 8 ,None],
+                'min_samples_leaf': [1, 2, 4],
+                'min_samples_split': [2, 5, 10], 
+                'class_weight': [self.class_weights], 
+                'criterion': ['gini', 'entropy'], 
+                'random_state': [0], 
+                'max_features': ['sqrt', 'log2']
             },
             'neural_network': {
-                'learning_rate': [0.0005, 0.001],
+                'learning_rate': [0.001, 0.01, 0.05, 0.1],
                 'dropout_rates': [(0.4, 0.3, 0.2), (0.5, 0.4, 0.3)],
                 'hidden_layers': [(64, 32, 16), (32, 16, 8)],
                 'weight_decay': [1e-5, 1e-4]
@@ -99,7 +103,7 @@ class FraudDetectionEnsemble:
         self.nn_model = None
         self.experiment_name = dbutils.widgets.get('MLFLOW_DIR')
 
-    def _optimize_threshold(self, y_true, y_prob, class_weight=0.9, lambda_reg=0.2):
+    def _optimize_threshold(self, y_true, y_prob, class_weight=0.65, lambda_reg=0.2):
         """Optimize threshold using precision-recall curve and regularization
         
         Args:
@@ -281,7 +285,7 @@ class FraudDetectionEnsemble:
             best_params = None
             best_threshold = 0.5
             
-            tscv = TimeSeriesSplit(n_splits=3)
+            tscv = TimeSeriesSplit(n_splits=10)
             
             for params in self._generate_param_combinations('xgboost'):
                 cv_scores = []
@@ -341,7 +345,7 @@ class FraudDetectionEnsemble:
             best_params = None
             best_threshold = 0.5
             
-            tscv = TimeSeriesSplit(n_splits=3)
+            tscv = TimeSeriesSplit(n_splits=10)
             
             for params in self._generate_param_combinations('random_forest'):
                 cv_scores = []
@@ -353,10 +357,7 @@ class FraudDetectionEnsemble:
                     
                     model = RandomForestClassifier(
                         **params,
-                        class_weight= self.class_weights,
                         n_jobs=-1,
-                        random_state=0,
-                        criterion = 'log_loss'
                     )
                     
                     model.fit(X_cv_train, y_cv_train)
@@ -385,11 +386,8 @@ class FraudDetectionEnsemble:
             # Initialize final model with best parameters
             self.rf_model = RandomForestClassifier(
                 **best_params,
-                class_weight='balanced_subsample',
                 n_jobs=-1,
-                random_state=42
             )
-            
             return best_params
     
     def _preprocess_data(self, data):
@@ -413,7 +411,7 @@ class FraudDetectionEnsemble:
             best_threshold = 0.5
             best_state_dict = None
             
-            tscv = TimeSeriesSplit(n_splits=3)
+            tscv = TimeSeriesSplit(n_splits=10)
             
             for params in self._generate_param_combinations('neural_network'):
                 cv_scores = []
@@ -559,7 +557,7 @@ class FraudDetectionEnsemble:
         
         return np.vstack((1 - weighted_probs, weighted_probs)).T
 
-    def predict(self, X, threshold=None, optimize_threshold=False, y_true=None, class_weight = 0.9):
+    def predict(self, X, threshold=None, optimize_threshold=False, y_true=None, class_weight = 0.65):
         """Get class predictions using optimized weights and thresholds"""
         probas = self.predict_proba(X)
         
@@ -597,9 +595,10 @@ class FraudDetectionEnsemble:
             
             # Tune individual models
             print("\nTuning individual models...")
-            nn_params = self._tune_neural_network(X_train, y_train, X_val, y_val)
             xgb_params = self._tune_xgboost(X_train, y_train, X_val, y_val)
             rf_params = self._tune_random_forest(X_train, y_train, X_val, y_val)
+            nn_params = self._tune_neural_network(X_train, y_train, X_val, y_val)
+
             
             # Train final models with best parameters
             print("\nTraining final models with best parameters...")
@@ -617,8 +616,7 @@ class FraudDetectionEnsemble:
             
             # Random Forest
             self.rf_model.fit(X_train, y_train)
-            
-            
+               
             # Optimize ensemble weights
             print("\nOptimizing ensemble weights...")
             optimized_weights = self._optimize_weights(X_val, y_val)
@@ -654,11 +652,7 @@ class FraudDetectionEnsemble:
             return val_metrics
    
 def evaluate_ensemble(ensemble, X, y):
-    """Evaluate ensemble model with comprehensive metrics and PR curve analysis"""
-    from sklearn.metrics import (roc_auc_score, precision_score, recall_score, 
-                               f1_score, accuracy_score, confusion_matrix,
-                               precision_recall_curve, average_precision_score)
-    
+    """Evaluate ensemble model with comprehensive metrics and PR curve analysis"""    
     # Get individual model probabilities
     xgb_probs = ensemble.xgb_model.predict_proba(X)[:, 1]
     rf_probs = ensemble.rf_model.predict_proba(X)[:, 1]
@@ -690,7 +684,7 @@ def evaluate_ensemble(ensemble, X, y):
         'optimal_threshold': optimal_threshold,
         'confusion_matrix': confusion_matrix(y, ensemble_preds).tolist()
     }
-    
+
     # Calculate individual model metrics
     model_probs = {
         'xgboost': xgb_probs,
@@ -795,7 +789,7 @@ def train_fraud_detection_system(raw_data):
     print("Starting fraud detection system training...")
         
     #split data 
-    train_df, test_df = get_train_test_set(raw_data, start_date_training=raw_data['TX_DATETIME'].min(), delta_train=7, delta_delay=3, delta_test=7)
+    train_df, test_df = get_train_test_set(raw_data, start_date_training=raw_data['TX_DATETIME'].min(), delta_train=3, delta_delay=3, delta_test=3)
     
     def prep_data(df):
         df['TX_DURING_WEEKEND'] = df['TX_DATETIME'].apply(is_weekend)
