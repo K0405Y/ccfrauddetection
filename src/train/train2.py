@@ -22,6 +22,7 @@ class FraudDetectionXGBoost:
         self.threshold = 0.5
         with open(param_config, 'r') as file:
             self.param_space = json.load(file)
+            
         self.xgb_model = None
         self.experiment_name = dbutils.widgets.get('MLFLOW_DIR')
 
