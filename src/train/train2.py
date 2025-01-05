@@ -73,10 +73,7 @@ class FraudDetectionXGBoost:
     def _tune_xgboost(self, X_train, y_train, X_val, y_val):
         print("\nTuning XGBoost hyperparameters...")
 
-        # Calculate class weights
         class_weights = self._calculate_class_weight(y_train)
-        sample_weights = np.array([class_weights[y] for y in y_train])
-
         with mlflow.start_run(nested=True, run_name="xgboost_tuning", experiment_id=
                               mlflow.get_experiment_by_name(self.experiment_name).experiment_id):
             best_score = -float('inf')
@@ -89,6 +86,8 @@ class FraudDetectionXGBoost:
                     X_cv_train, X_cv_val = X_train[train_idx], X_train[val_idx]
                     y_cv_train, y_cv_val = y_train[train_idx], y_train[val_idx]
 
+                    cv_sample_weights = np.array([class_weights[y] for y in y_cv_train])
+
                     if len(np.unique(y_cv_val)) < 2:
                         continue
                     model = xgb.XGBClassifier(
@@ -99,7 +98,7 @@ class FraudDetectionXGBoost:
                     )
                     model.fit(
                         X_cv_train, y_cv_train,
-                        sample_weight=sample_weights,
+                        sample_weight=cv_sample_weights,
                         eval_set=[(X_cv_val, y_cv_val)],
                         early_stopping_rounds=30,
                         verbose=False
