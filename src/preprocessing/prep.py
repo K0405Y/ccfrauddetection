@@ -1,7 +1,6 @@
 import pandas as pd  
 import datetime  
 from sklearn.model_selection import train_test_split
-from imblearn.over_sampling import SMOTE 
 import warnings
 warnings.filterwarnings('ignore')
 
