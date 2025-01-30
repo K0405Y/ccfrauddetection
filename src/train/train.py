@@ -180,7 +180,7 @@ def train_fraud_detection_system(raw_data):
     print("Starting fraud detection system training...")
     train_df, test_df = get_train_test_set(raw_data, 
                                           start_date_training=raw_data['TX_DATETIME'].min(), 
-                                          delta_train=14, 
+                                          delta_train=7, 
                                           delta_delay=3, 
                                           delta_test=7)
     
