@@ -4,9 +4,8 @@ from src.preprocessing.prep import get_train_test_set, is_weekend, is_night, get
 import pandas as pd
 import numpy as np
 import datetime 
-from sklearn.model_selection import TimeSeriesSplit
-from sklearn.calibration import CalibratedClassifierCV
-from sklearn.metrics import roc_auc_score, precision_score, accuracy_score, recall_score, f1_score, average_precision_score,precision_recall_curve
+from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import roc_auc_score, precision_score, accuracy_score, recall_score, f1_score, average_precision_score,precision_recall_curve, auc
 import xgboost as xgb
 import mlflow
 import matplotlib.pyplot as plt
@@ -43,34 +42,28 @@ class FraudDetectionXGBoost:
     def _calculate_metrics(self, y_true, y_prob, threshold=None):
         """
         Calculates model evaluation metrics based on predicted probabilities.
-
-        Parameters:
-        - y_true: Ground truth labels (0 or 1)
-        - y_prob: Predicted fraud probabilities
-        - threshold: Decision threshold for classification (default: self.threshold)
-
-        Returns:
-        - Dictionary containing evaluation metrics:
-          - 'average_precision': AUCPR score
-          - 'auc': AUC-ROC score
-          - 'precision': Precision score
-          - 'recall': Recall score
-          - 'f1': F1-score
-          - 'accuracy': Accuracy score
+        Now uses actual AUC of precision-recall curve instead of average precision.
         """
         if threshold is None:
-            threshold = self.threshold  # Use the default threshold if none is provided
+            threshold = self.threshold
 
-        # Convert probabilities into binary predictions using the threshold
+        # Convert probabilities to binary predictions
         y_pred = (y_prob >= threshold).astype(int)
+        
+        # Calculate precision-recall curve and compute AUC
+        precisions, recalls, _ = precision_recall_curve(y_true, y_prob)
+        
+        # Calculate AUCPR using trapezoidal rule
+        # Reverse order since recalls are in descending order
+        aucpr = auc(recalls[::-1], precisions[::-1])
 
         return {
-            'average_precision': average_precision_score(y_true, y_prob),  # AUCPR score
-            'auc': roc_auc_score(y_true, y_prob),  # AUC-ROC score
-            'precision': precision_score(y_true, y_pred),  # Precision
-            'recall': recall_score(y_true, y_pred),  # Recall
-            'f1': f1_score(y_true, y_pred),  # F1-score
-            'accuracy': accuracy_score(y_true, y_pred)  # Accuracy
+            'aucpr': aucpr,  # Using actual AUC of PR curve instead of average_precision_score
+            'auc': roc_auc_score(y_true, y_prob),
+            'precision': precision_score(y_true, y_pred),
+            'recall': recall_score(y_true, y_pred),
+            'f1': f1_score(y_true, y_pred),
+            'accuracy': accuracy_score(y_true, y_pred)
         }
     
     def _optimize_threshold(self, y_true, y_prob):
@@ -94,8 +87,8 @@ class FraudDetectionXGBoost:
         # Add the maximum threshold (1.0) for completeness
         thresholds = np.append(thresholds, 1.0)
 
-        # ---- Enforce Minimum Threshold Constraint (≥ 0.4) ----
-        valid_thresholds = thresholds >= 0.4
+        # ---- Enforce Minimum Threshold Constraint (≥ 0.5) ----
+        valid_thresholds = thresholds >= 0.5
         precisions, recalls, thresholds = precisions[valid_thresholds], recalls[valid_thresholds], thresholds[valid_thresholds]
 
         # ---- Ensure Recall Constraint (≥ 70%) ----
@@ -162,46 +155,33 @@ class FraudDetectionXGBoost:
 
     def _tune_xgboost(self, X_train, y_train, X_val, y_val):
         """
-        Performs hyperparameter tuning using TimeSeriesSplit cross-validation.
-
-        Parameters:
-        - X_train: Training feature matrix
-        - y_train: Training labels
-        - X_val: Validation feature matrix
-        - y_val: Validation labels
-
-        Updates:
-        - Stores the best hyperparameter set in self.xgb_model.
-        - Logs the best hyperparameters in MLflow.
+        Performs hyperparameter tuning using StratifiedKFold cross-validation.
         """
         print("\nTuning XGBoost hyperparameters...")
 
-        # Start an MLflow nested run for hyperparameter tuning
         with mlflow.start_run(nested=True, run_name="xgboost_tuning", 
                             experiment_id=mlflow.get_experiment_by_name(self.experiment_name).experiment_id):
             
-            best_score = -float('inf')  # Initialize best score tracker
-            best_params = None  # Placeholder for best hyperparameters
-            tscv = TimeSeriesSplit(n_splits=5)  # Time-based cross-validation split
+            best_score = -float('inf')
+            best_params = None
+            
+            # Use StratifiedKFold for cross-validation
+            skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
             # Iterate over all possible hyperparameter combinations
             for params in self._generate_param_combinations():
-                cv_scores = []  # Store cross-validation scores
+                cv_scores = []
 
-                # Perform TimeSeriesSplit cross-validation
-                for train_idx, val_idx in tscv.split(X_train):
+                # Perform StratifiedKFold cross-validation
+                for train_idx, val_idx in skf.split(X_train, y_train):
                     X_cv_train, X_cv_val = X_train[train_idx], X_train[val_idx]
                     y_cv_train, y_cv_val = y_train[train_idx], y_train[val_idx]
-
-                    # Ensure the validation set has at least two classes
-                    if len(np.unique(y_cv_val)) < 2:
-                        continue
 
                     # Initialize XGBoost model with given parameters
                     model = xgb.XGBClassifier(
                         **params,
-                        tree_method='hist',  # Optimized tree-building method
-                        eval_metric=['aucpr']  # Use AUCPR (Area Under Precision-Recall Curve)
+                        tree_method='hist',
+                        eval_metric=['aucpr']
                     )
 
                     # Train model using early stopping
@@ -214,9 +194,12 @@ class FraudDetectionXGBoost:
 
                     # Get predicted probabilities for validation set
                     y_prob = model.predict_proba(X_cv_val)[:, 1]
-
-                    # Compute AUCPR for the fold
-                    cv_scores.append(average_precision_score(y_cv_val, y_prob))
+                    
+                    # Calculate precision-recall curve and compute AUC
+                    precisions, recalls, _ = precision_recall_curve(y_cv_val, y_prob)
+                    # Calculate AUCPR using trapezoidal rule
+                    aucpr = auc(recalls[::-1], precisions[::-1])
+                    cv_scores.append(aucpr)
 
                 # Compute average cross-validation score
                 mean_score = np.mean(cv_scores)
@@ -479,4 +462,4 @@ df = pd.concat(df_list, ignore_index=True)
 df = df.drop(df.columns[0], axis=1)
 
 # Train the fraud detection model
-train_fraud_detection_system(df)
+train_fraud_detection_system(df) 
