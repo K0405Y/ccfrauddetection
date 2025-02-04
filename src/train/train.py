@@ -97,7 +97,7 @@ class FraudDetectionXGBoost:
         if not np.any(valid_points):
             # No threshold meets recall ≥ 70%, so fall back to maximizing F2-score
             print("Warning: No threshold achieves minimum recall of 0.70 with threshold ≥ 0.4")
-            f2_scores = (5 * precisions * recalls) / (4 * precisions + recalls)
+            f2_scores = (5  precisions  recalls) / (4 * precisions + recalls)
             best_idx = np.argmax(f2_scores)  # Find the threshold that maximizes F2-score
         else:
             # Filter precision, recall, and threshold values that satisfy recall ≥ 70%
@@ -106,7 +106,7 @@ class FraudDetectionXGBoost:
             valid_thresholds = thresholds[valid_points]
 
             # Compute F2-score (higher weight on recall)
-            f2_scores = (5 * valid_precisions * valid_recalls) / (4 * valid_precisions + valid_recalls)
+            f2_scores = (5  valid_precisions  valid_recalls) / (4 * valid_precisions + valid_recalls)
             best_idx = np.argmax(f2_scores)  # Select the best threshold based on F2-score
 
         # Select the optimal threshold
@@ -119,7 +119,7 @@ class FraudDetectionXGBoost:
         print(f"\nAt selected threshold {selected_threshold:.4f}:")
         print(f"Recall: {metrics['recall']:.4f}")
         print(f"Precision: {metrics['precision']:.4f}")
-        print(f"F2 Score: {(5 * metrics['precision'] * metrics['recall']) / (4 * metrics['precision'] + metrics['recall']):.4f}")    
+        print(f"F2 Score: {(5  metrics['precision']  metrics['recall']) / (4 * metrics['precision'] + metrics['recall']):.4f}")    
 
         # ---- Plot and Log Precision-Recall Curve in MLflow ----
         plt.figure(figsize=(8, 6))
@@ -181,7 +181,9 @@ class FraudDetectionXGBoost:
                     model = xgb.XGBClassifier(
                         **params,
                         tree_method='hist',
-                        eval_metric=['aucpr']
+                        eval_metric=['aucpr'],
+                        objective='binary:logistic',
+                        scale_pos_weight=np.sum(y_cv_train == 0) / np.sum(y_cv_train == 1)
                     )
 
                     # Train model using early stopping
@@ -220,13 +222,14 @@ class FraudDetectionXGBoost:
             self.xgb_model = xgb.XGBClassifier(
                 **best_params,
                 tree_method='hist',
-                eval_metric=['aucpr']
+                eval_metric=['aucpr'],
+                objective='binary:logistic',
+                scale_pos_weight=np.sum(y_train == 0) / np.sum(y_train == 1)
             )
 
     def train(self, X_train, y_train, X_val, y_val):
         """
         Trains the XGBoost model using optimized hyperparameters.
-
         Parameters:
         - X_train: Training feature matrix
         - y_train: Training labels
@@ -315,10 +318,10 @@ def train_fraud_detection_system(raw_data):
     # Split dataset into training, validation, and test sets based on time-based logic.
     train_df, test_df = get_train_test_set(
         raw_data, 
-        start_date_training=raw_data['TX_DATETIME'].min(),  # Use earliest available date
-        delta_train=7,  # Training period of 7 days
-        delta_delay=3,   # Delay period of 3 days (to avoid data leakage)
-        delta_test=7     # Testing period of 7 days
+        start_date_training=raw_data['TX_DATETIME'].min(),
+        delta_train=28,  
+        delta_delay=5,   
+        delta_test=28   
     )
 
     def prep_data(df, training=False):
