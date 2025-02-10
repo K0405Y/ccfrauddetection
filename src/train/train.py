@@ -1,6 +1,6 @@
 import sys
 import os
-from src.preprocessing.prep import get_train_test_set, is_weekend, is_night, get_customer_spending_features, get_count_risk_rolling_window
+from src.preprocessing.prep import get_train_test_set, is_weekend, is_night, get_customer_spending_features, get_count_risk_rolling_window, apply_smote_sampling
 import pandas as pd
 import numpy as np
 import datetime 
@@ -42,7 +42,14 @@ class FraudDetectionXGBoost:
     def _calculate_metrics(self, y_true, y_prob, threshold=None):
         """
         Calculates model evaluation metrics based on predicted probabilities.
-        Now uses actual AUC of precision-recall curve instead of average precision.
+         
+        Parameters:
+        - y_true: Ground truth labels (0 or 1)
+        - y_prob: Predicted probabilities from the model
+        - threshold: Classification threshold (default: None, set later)
+
+        Returns:
+        - Dictionary containing model evaluation metrics: 'auc', 'aucpr', 'precision', 'recall', 'f1', 'accuracy'
         """
         if threshold is None:
             threshold = self.threshold
@@ -97,7 +104,7 @@ class FraudDetectionXGBoost:
         if not np.any(valid_points):
             # No threshold meets recall ≥ 70%, so fall back to maximizing F2-score
             print("Warning: No threshold achieves minimum recall of 0.70 with threshold ≥ 0.4")
-            f2_scores = (5  precisions  recalls) / (4 * precisions + recalls)
+            f2_scores = (5 * precisions * recalls) / (4 * precisions + recalls)
             best_idx = np.argmax(f2_scores)  # Find the threshold that maximizes F2-score
         else:
             # Filter precision, recall, and threshold values that satisfy recall ≥ 70%
@@ -106,7 +113,7 @@ class FraudDetectionXGBoost:
             valid_thresholds = thresholds[valid_points]
 
             # Compute F2-score (higher weight on recall)
-            f2_scores = (5  valid_precisions  valid_recalls) / (4 * valid_precisions + valid_recalls)
+            f2_scores = (5 * valid_precisions *  valid_recalls) / (4 * valid_precisions + valid_recalls)
             best_idx = np.argmax(f2_scores)  # Select the best threshold based on F2-score
 
         # Select the optimal threshold
@@ -119,7 +126,7 @@ class FraudDetectionXGBoost:
         print(f"\nAt selected threshold {selected_threshold:.4f}:")
         print(f"Recall: {metrics['recall']:.4f}")
         print(f"Precision: {metrics['precision']:.4f}")
-        print(f"F2 Score: {(5  metrics['precision']  metrics['recall']) / (4 * metrics['precision'] + metrics['recall']):.4f}")    
+        print(f"F2 Score: {(5 * metrics['precision'] * metrics['recall']) / (4 * metrics['precision'] + metrics['recall']):.4f}")    
 
         # ---- Plot and Log Precision-Recall Curve in MLflow ----
         plt.figure(figsize=(8, 6))
@@ -162,77 +169,21 @@ class FraudDetectionXGBoost:
     def _tune_xgboost(self, X_train, y_train, X_val, y_val):
         """
         Perform hyperparameter tuning using RandomizedSearchCV
+
+        Parameters:
+        - X_train: Training features
+        - y_train: Training labels
+        - X_val: Validation features
+        - y_val: Validation labels
+
+        Upd:
+        - best_model: Trained model with optimal hyperparameters
         """
         print("\nTuning XGBoost hyperparameters using RandomizedSearchCV...")
 
         with mlflow.start_run(nested=True, run_name="xgboost_randomized_tuning", 
                             experiment_id=mlflow.get_experiment_by_name(self.experiment_name).experiment_id):
             
-<<<<<<< Updated upstream
-            best_score = -float('inf')
-            best_params = None
-            
-            # Use StratifiedKFold for cross-validation
-            skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-
-            # Iterate over all possible hyperparameter combinations
-            for params in self._generate_param_combinations():
-                cv_scores = []
-
-                # Perform StratifiedKFold cross-validation
-                for train_idx, val_idx in skf.split(X_train, y_train):
-                    X_cv_train, X_cv_val = X_train[train_idx], X_train[val_idx]
-                    y_cv_train, y_cv_val = y_train[train_idx], y_train[val_idx]
-
-                    # Initialize XGBoost model with given parameters
-                    model = xgb.XGBClassifier(
-                        **params,
-                        tree_method='hist',
-                        eval_metric=['aucpr'],
-                        objective='binary:logistic',
-                        scale_pos_weight=np.sum(y_cv_train == 0) / np.sum(y_cv_train == 1)
-                    )
-
-                    # Train model using early stopping
-                    model.fit(
-                        X_cv_train, y_cv_train,
-                        eval_set=[(X_cv_val, y_cv_val)],
-                        early_stopping_rounds=30,
-                        verbose=False
-                    )
-
-                    # Get predicted probabilities for validation set
-                    y_prob = model.predict_proba(X_cv_val)[:, 1]
-                    
-                    # Calculate precision-recall curve and compute AUC
-                    precisions, recalls, _ = precision_recall_curve(y_cv_val, y_prob)
-                    # Calculate AUCPR using trapezoidal rule
-                    aucpr = auc(recalls[::-1], precisions[::-1])
-                    cv_scores.append(aucpr)
-
-                # Compute average cross-validation score
-                mean_score = np.mean(cv_scores)
-
-                # If current model performs better, update best parameters
-                if mean_score > best_score:
-                    best_score = mean_score
-                    best_params = params
-
-            # Log best parameters to MLflow
-            mlflow.log_params(best_params)
-
-            print("\nBest parameters:")
-            for param, value in best_params.items():
-                print(f"{param}: {value}")
-
-            # Store the best XGBoost model with optimized parameters
-            self.xgb_model = xgb.XGBClassifier(
-                **best_params,
-                tree_method='hist',
-                eval_metric=['aucpr'],
-                objective='binary:logistic',
-                scale_pos_weight=np.sum(y_train == 0) / np.sum(y_train == 1)
-=======
             # Create base model
             base_model = xgb.XGBClassifier(
                 tree_method='hist',
@@ -240,7 +191,6 @@ class FraudDetectionXGBoost:
                 objective='binary:logistic',
                 scale_pos_weight=np.sum(y_train == 0) / np.sum(y_train == 1),
                 early_stopping_rounds=30
->>>>>>> Stashed changes
             )
 
             # Create RandomizedSearchCV object
@@ -270,6 +220,7 @@ class FraudDetectionXGBoost:
 
             # Store best model
             self.xgb_model = random_search.best_estimator_
+
 
     def train(self, X_train, y_train, X_val, y_val):
         """
@@ -362,10 +313,9 @@ def train_fraud_detection_system(raw_data):
     train_df, test_df = get_train_test_set(
         raw_data, 
         start_date_training=raw_data['TX_DATETIME'].min(),
-        delta_train=150,  
-        delta_delay=7,   
-        delta_test=60   
-    )
+        delta_train=60,  
+        delta_delay=5,   
+        delta_test=28)   
 
     def prep_data(df, training=False):
         df['TX_DURING_WEEKEND'] = df['TX_DATETIME'].apply(is_weekend)
@@ -385,6 +335,9 @@ def train_fraud_detection_system(raw_data):
     # ---- Step 2: Data Preprocessing ----
     print("Preprocessing training data...")
     X_train, y_train, train_features = prep_data(train_df, training=True)
+
+    print("Applying SMOTE sampling...")
+    X_resampled, y_resampled = apply_smote_sampling(X_train, y_train)
 
     print("Preprocessing validation data...")
     # Split test set into validation and final test set while maintaining fraud ratio
@@ -408,11 +361,13 @@ def train_fraud_detection_system(raw_data):
     data_stats = {
         'total_samples': len(raw_data),
         'training_samples': len(X_train),
+        'training_smote_sample': len(X_resampled),
         'validation_samples': len(X_val),
         'test_samples': len(X_test),
         'feature_dimension': X_train.shape[1],
         'original_fraud_ratio': float(raw_data['TX_FRAUD'].mean()),
         'training_fraud_ratio': float(y_train.mean()),
+        'resampled_fraud_ratio': float(y_resampled.mean()),
         'validation_fraud_ratio': float(y_val.mean()),
         'test_fraud_ratio': float(y_test.mean())
     }
@@ -425,7 +380,7 @@ def train_fraud_detection_system(raw_data):
     print("\nInitializing XGBoost model...")
     feature_names = train_features  # Store feature names for reference
     model = FraudDetectionXGBoost(
-        input_dim=X_train.shape[1],  # Set input dimensions
+        input_dim=X_resampled.shape[1],  # Set input dimensions
         feature_names=feature_names
     )
 
@@ -438,7 +393,7 @@ def train_fraud_detection_system(raw_data):
         mlflow.log_params(data_stats)
 
         # Train XGBoost model with hyperparameter tuning and threshold optimization
-        model.train(X_train, y_train, X_val, y_val)
+        model.train(X_resampled, y_resampled, X_val, y_val)
 
         # ---- Step 6: Evaluate Model Performance ----
         print("\nEvaluating on test data...")
@@ -453,12 +408,12 @@ def train_fraud_detection_system(raw_data):
         mlflow.log_metrics(test_metrics)
 
         # ---- Step 7: Log Trained Model to MLflow ----
-        input_example = pd.DataFrame(X_train[:1], columns=feature_names)  # Example input data
+        input_example = pd.DataFrame(X_resampled[:1], columns=feature_names)  # Example input data
 
         # Log XGBoost model
         base_signature = mlflow.models.signature.infer_signature(
-            X_train, 
-            model.xgb_model.predict_proba(X_train)  # Ensure probability-based output
+            X_resampled, 
+            model.xgb_model.predict_proba(X_resampled)  # Ensure probability-based output
         )
         mlflow.sklearn.log_model(
             sk_model=model.xgb_model,

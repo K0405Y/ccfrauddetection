@@ -1,6 +1,9 @@
 import pandas as pd  
 import datetime  
 from sklearn.model_selection import train_test_split
+from imblearn.under_sampling import RandomUnderSampler
+from imblearn.over_sampling import SMOTE
+from imblearn.pipeline import Pipeline
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -107,3 +110,26 @@ def get_count_risk_rolling_window(terminal_transactions, delay_period=7, windows
     terminal_transactions.fillna(0, inplace=True)  # Replace NaN values with 0
 
     return terminal_transactions
+
+def apply_smote_sampling(X_train, y_train, sampling_strategy=0.3, random_state=42):
+    """
+    Apply SMOTE sampling to the training data.    
+    
+    """
+    # First apply mild undersampling to reduce majority class
+    # This helps with memory efficiency when dealing with large datasets
+    # rus = RandomUnderSampler(sampling_strategy=0.1, random_state=random_state)
+    
+    # Then apply SMOTE to increase minority class
+    smote = SMOTE(sampling_strategy=sampling_strategy, random_state=random_state)
+    
+    # # Create a pipeline of the sampling steps
+    # pipeline = Pipeline([
+    #     ('undersampling', rus),
+    #     ('smote', smote)
+    # ])
+    
+    # Apply the resampling pipeline
+    X_resampled, y_resampled = smote.fit_resample(X_train, y_train)
+    
+    return X_resampled, y_resampled
