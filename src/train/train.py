@@ -4,7 +4,8 @@ from src.preprocessing.prep import get_train_test_set, is_weekend, is_night, get
 import pandas as pd
 import numpy as np
 import datetime 
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import StratifiedKFold, RandomizedSearchCV
+from scipy.stats import randint, uniform, loguniform
 from sklearn.metrics import roc_auc_score, precision_score, accuracy_score, recall_score, f1_score, average_precision_score,precision_recall_curve, auc
 import xgboost as xgb
 import mlflow
@@ -18,7 +19,6 @@ class FraudDetectionXGBoost:
     """
     XGBoost-based fraud detection model with threshold optimization and MLflow tracking.
     """
-
     def __init__(self, input_dim=None, feature_names=None, param_config=dbutils.widgets.get('PARAM_CONFIG')):
         """
         Initializes the fraud detection model.
@@ -28,16 +28,16 @@ class FraudDetectionXGBoost:
         - feature_names: List of feature names (default: None)
         - param_config: Path to JSON file containing hyperparameter search space (set via Databricks widget)
         """
-        self.input_dim = input_dim  # Stores the number of input features
-        self.feature_names = feature_names  # Stores the names of features
-        self.threshold = 0.5  # Default classification threshold
+        self.input_dim = input_dim  
+        self.feature_names = feature_names 
+        self.threshold = 0.5 
 
         # Load hyperparameter search space from JSON file
         with open(param_config, 'r') as file:
-            self.param_space = json.load(file)
-
-        self.xgb_model = None  # Placeholder for trained XGBoost model
-        self.experiment_name = dbutils.widgets.get('MLFLOW_DIR')  # MLflow experiment name
+            self.param_config = json.load(file)
+        self.param_distributions = self._create_param_distributions()
+        self.xgb_model = None  
+        self.experiment_name = dbutils.widgets.get('MLFLOW_DIR') 
 
     def _calculate_metrics(self, y_true, y_prob, threshold=None):
         """
@@ -140,28 +140,35 @@ class FraudDetectionXGBoost:
 
         return selected_threshold  # Return the optimized threshold
 
-    def _generate_param_combinations(self):
+    def _create_param_distributions(self):
         """
-        Generates all possible hyperparameter combinations from the defined search space.
-
-        Returns:
-        - List of dictionaries, each representing a unique hyperparameter combination.
+        Convert parameter configuration to scipy.stats distributions for RandomizedSearchCV
         """
-        param_names = list(self.param_space.keys())  # Extract hyperparameter names
-        param_values = list(self.param_space.values())  # Extract corresponding value ranges
-        
-        # Generate all possible combinations using itertools.product
-        return [dict(zip(param_names, combo)) for combo in itertools.product(*param_values)]
+        distributions = {}
+        for param_name, config in self.param_config.items():
+            if config['distribution'] == 'randint':
+                distributions[param_name] = randint(config['params'][0], config['params'][1])
+            elif config['distribution'] == 'uniform':
+                distributions[param_name] = uniform(config['params'][0], 
+                                                 config['params'][1] - config['params'][0])
+            elif config['distribution'] == 'loguniform':
+                distributions[param_name] = loguniform(np.exp(config['params'][0]), 
+                                                    np.exp(config['params'][1]))
+            elif config['distribution'] == 'fixed':
+                distributions[param_name] = [config['params'][0]]
+                
+        return distributions
 
     def _tune_xgboost(self, X_train, y_train, X_val, y_val):
         """
-        Performs hyperparameter tuning using StratifiedKFold cross-validation.
+        Perform hyperparameter tuning using RandomizedSearchCV
         """
-        print("\nTuning XGBoost hyperparameters...")
+        print("\nTuning XGBoost hyperparameters using RandomizedSearchCV...")
 
-        with mlflow.start_run(nested=True, run_name="xgboost_tuning", 
+        with mlflow.start_run(nested=True, run_name="xgboost_randomized_tuning", 
                             experiment_id=mlflow.get_experiment_by_name(self.experiment_name).experiment_id):
             
+<<<<<<< Updated upstream
             best_score = -float('inf')
             best_params = None
             
@@ -225,7 +232,44 @@ class FraudDetectionXGBoost:
                 eval_metric=['aucpr'],
                 objective='binary:logistic',
                 scale_pos_weight=np.sum(y_train == 0) / np.sum(y_train == 1)
+=======
+            # Create base model
+            base_model = xgb.XGBClassifier(
+                tree_method='hist',
+                eval_metric=['aucpr'],
+                objective='binary:logistic',
+                scale_pos_weight=np.sum(y_train == 0) / np.sum(y_train == 1),
+                early_stopping_rounds=30
+>>>>>>> Stashed changes
             )
+
+            # Create RandomizedSearchCV object
+            random_search = RandomizedSearchCV(
+                estimator=base_model,
+                param_distributions=self.param_distributions,
+                n_iter=50, 
+                scoring= 'recall', 
+                n_jobs=-1,
+                cv=5, 
+                verbose=2,
+                random_state=42,
+                return_train_score=True,
+            )
+
+            # Fit RandomizedSearchCV
+            random_search.fit(
+                X_train, 
+                y_train, 
+                eval_set=[(X_val, y_val)],
+                verbose=False
+            )
+
+            # Log best parameters and score
+            mlflow.log_params(random_search.best_params_)
+            mlflow.log_metric("best_cv_score", random_search.best_score_)
+
+            # Store best model
+            self.xgb_model = random_search.best_estimator_
 
     def train(self, X_train, y_train, X_val, y_val):
         """
@@ -249,7 +293,6 @@ class FraudDetectionXGBoost:
         self.xgb_model.fit(
             X_train, y_train,
             eval_set=[(X_val, y_val)],
-            early_stopping_rounds=30,
             verbose=False
         )
 
@@ -319,9 +362,15 @@ def train_fraud_detection_system(raw_data):
     train_df, test_df = get_train_test_set(
         raw_data, 
         start_date_training=raw_data['TX_DATETIME'].min(),
+<<<<<<< Updated upstream
         delta_train=28,  
         delta_delay=5,   
         delta_test=28   
+=======
+        delta_train=150,  
+        delta_delay=7,   
+        delta_test=60   
+>>>>>>> Stashed changes
     )
 
     def prep_data(df, training=False):

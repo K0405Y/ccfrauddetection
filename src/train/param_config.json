@@ -1,13 +1,42 @@
 {
-            "max_depth": [8, 10, 12],
-            "learning_rate": [0.01, 0.05, 0.1],
-            "n_estimators": [400, 500, 600],
-            "min_child_weight": [3, 5],
-            "subsample": [0.6, 0.7, 0.8],
-            "colsample_bytree": [0.7, 0.8, 0.9],
-            "max_delta_step": [3,6,9],
-            "gamma": [0.5, 1.0],
-            "reg_alpha": [0.5, 1.0],
-            "reg_lambda": [1, 2],
-            "scale_pos_weight": [284]
+    "max_depth": {
+      "distribution": "randint",
+      "params": [3, 16]
+    },
+    "learning_rate": {
+      "distribution": "loguniform",
+      "params": [-6.907755, -1.609438] 
+    },
+    "n_estimators": {
+      "distribution": "randint",
+      "params": [100, 1001]
+    },
+    "min_child_weight": {
+      "distribution": "randint",
+      "params": [1, 8]
+    },
+    "subsample": {
+      "distribution": "uniform",
+      "params": [0.5, 1.0]
+    },
+    "colsample_bytree": {
+      "distribution": "uniform",
+      "params": [0.5, 1.0]
+    },
+    "max_delta_step": {
+      "distribution": "randint",
+      "params": [0, 11]
+    },
+    "gamma": {
+      "distribution": "uniform",
+      "params": [0.0, 2.0]
+    },
+    "reg_alpha": {
+      "distribution": "uniform",
+      "params": [0.0, 2.0]
+    },
+    "reg_lambda": {
+      "distribution": "loguniform",
+      "params": [-2.302585, 1.386294] 
+    }
 }
