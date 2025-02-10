@@ -362,15 +362,9 @@ def train_fraud_detection_system(raw_data):
     train_df, test_df = get_train_test_set(
         raw_data, 
         start_date_training=raw_data['TX_DATETIME'].min(),
-<<<<<<< Updated upstream
-        delta_train=28,  
-        delta_delay=5,   
-        delta_test=28   
-=======
         delta_train=150,  
         delta_delay=7,   
         delta_test=60   
->>>>>>> Stashed changes
     )
 
     def prep_data(df, training=False):
