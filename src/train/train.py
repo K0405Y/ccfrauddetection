@@ -150,6 +150,9 @@ class FraudDetectionXGBoost:
     def _create_param_distributions(self):
         """
         Convert parameter configuration to scipy.stats distributions for RandomizedSearchCV
+
+        Returns:
+        - Dictionary of parameter names and scipy.stats distributions
         """
         distributions = {}
         for param_name, config in self.param_config.items():
@@ -176,7 +179,7 @@ class FraudDetectionXGBoost:
         - X_val: Validation features
         - y_val: Validation labels
 
-        Upd:
+        Updates:
         - best_model: Trained model with optimal hyperparameters
         """
         print("\nTuning XGBoost hyperparameters using RandomizedSearchCV...")
