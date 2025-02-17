@@ -1,9 +1,8 @@
 import pandas as pd  
+import numpy as np
 import datetime  
-from sklearn.model_selection import train_test_split
-from imblearn.under_sampling import RandomUnderSampler
+from scipy.stats import skew, kurtosis
 from imblearn.over_sampling import SMOTE
-from imblearn.pipeline import Pipeline
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -110,6 +109,142 @@ def get_count_risk_rolling_window(terminal_transactions, delay_period=7, windows
     terminal_transactions.fillna(0, inplace=True)  # Replace NaN values with 0
 
     return terminal_transactions
+
+def get_network_features(transactions_df, window_size_days=30):
+    """
+    Create network-based features capturing relationships between 
+    customers, terminals, and transaction patterns.
+    """
+    transactions_df = transactions_df.copy()
+    
+    # Set time window
+    transactions_df['TX_DATETIME'] = pd.to_datetime(transactions_df['TX_DATETIME'])
+    end_date = transactions_df['TX_DATETIME'].max()
+    start_date = end_date - pd.Timedelta(days=window_size_days)
+    
+    # Group by customer
+    customer_groups = transactions_df.groupby('CUSTOMER_ID')
+    
+    # Number of unique terminals per customer
+    transactions_df['CUSTOMER_UNIQUE_TERMINALS'] = customer_groups['TERMINAL_ID'].transform('nunique')
+    
+    # Terminal switching speed (average time between using different terminals)
+    def get_terminal_switching_speed(group):
+        if len(group) <= 1:
+            return 0
+        group = group.sort_values('TX_DATETIME')
+        terminal_changes = (group['TERMINAL_ID'] != group['TERMINAL_ID'].shift()).astype(int)
+        time_diff = group['TX_DATETIME'].diff().dt.total_seconds() / 3600  # in hours
+        return (terminal_changes * time_diff).mean()
+    
+    transactions_df['TERMINAL_SWITCHING_SPEED'] = customer_groups.apply(get_terminal_switching_speed)
+    
+    return transactions_df
+
+def get_velocity_features(transactions_df, time_windows=[1, 3, 6, 12, 24]):
+    """
+    Create velocity features for different time windows (in hours)
+    """
+    features = transactions_df.copy()
+    
+    for window in time_windows:
+        # Convert window to timedelta
+        window_delta = pd.Timedelta(hours=window)
+        
+        # Create window start time
+        features[f'window_start_{window}h'] = features['TX_DATETIME'] - window_delta
+        
+        # Group by customer and calculate features
+        grouped = features.groupby('CUSTOMER_ID')
+        
+        # Number of transactions in window
+        features[f'tx_count_{window}h'] = grouped.apply(
+            lambda x: x.apply(
+                lambda row: len(x[(x['TX_DATETIME'] > row['window_start_{window}h']) & 
+                                (x['TX_DATETIME'] <= row['TX_DATETIME'])]), 
+                axis=1
+            )
+        )
+        
+        # Transaction amount velocity
+        features[f'amount_velocity_{window}h'] = grouped.apply(
+            lambda x: x.apply(
+                lambda row: x[(x['TX_DATETIME'] > row[f'window_start_{window}h']) & 
+                             (x['TX_DATETIME'] <= row['TX_DATETIME'])]['TX_AMOUNT'].sum(), 
+                axis=1
+            )
+        )
+        
+        # Drop temporary columns
+        features = features.drop(f'window_start_{window}h', axis=1)
+    
+    return features
+
+def get_time_pattern_features(transactions_df):
+    """
+    Create features based on temporal patterns
+    """
+    df = transactions_df.copy()
+    
+    # Extract more granular time components
+    df['TX_HOUR'] = df['TX_DATETIME'].dt.hour
+    df['TX_MINUTE'] = df['TX_DATETIME'].dt.minute
+    df['TX_DAY_OF_WEEK'] = df['TX_DATETIME'].dt.dayofweek
+    df['TX_DAY_OF_MONTH'] = df['TX_DATETIME'].dt.day
+    df['TX_MONTH'] = df['TX_DATETIME'].dt.month
+    
+    # Create cyclical features for time components
+    df['HOUR_SIN'] = np.sin(2 * np.pi * df['TX_HOUR']/24)
+    df['HOUR_COS'] = np.cos(2 * np.pi * df['TX_HOUR']/24)
+    df['MONTH_SIN'] = np.sin(2 * np.pi * df['TX_MONTH']/12)
+    df['MONTH_COS'] = np.cos(2 * np.pi * df['TX_MONTH']/12)
+    
+    # Time since last transaction (per customer)
+    df = df.sort_values(['CUSTOMER_ID', 'TX_DATETIME'])
+    df['TIME_SINCE_LAST_TX'] = df.groupby('CUSTOMER_ID')['TX_DATETIME'].diff().dt.total_seconds()
+    
+    return df
+
+def get_statistical_features(transactions_df, windows=[7, 30]):
+    """
+    Create features based on statistical deviations from normal patterns
+    """
+    df = transactions_df.copy()
+    
+    for window in windows:
+        # Calculate rolling statistics for amount
+        df[f'AMOUNT_MEAN_{window}d'] = df.groupby('CUSTOMER_ID')['TX_AMOUNT'].transform(
+            lambda x: x.rolling(window, min_periods=1).mean())
+        df[f'AMOUNT_STD_{window}d'] = df.groupby('CUSTOMER_ID')['TX_AMOUNT'].transform(
+            lambda x: x.rolling(window, min_periods=1).std())
+        
+        # Z-score of current transaction amount
+        df[f'AMOUNT_ZSCORE_{window}d'] = (df['TX_AMOUNT'] - df[f'AMOUNT_MEAN_{window}d']) / \
+                                        df[f'AMOUNT_STD_{window}d'].replace(0, 1)
+        
+        # Median absolute deviation
+        df[f'AMOUNT_MAD_{window}d'] = df.groupby('CUSTOMER_ID')['TX_AMOUNT'].transform(
+            lambda x: x.rolling(window, min_periods=1).apply(lambda x: np.median(np.abs(x - np.median(x)))))
+    
+    return df
+
+def get_ratio_features(transactions_df):
+    """
+    Create ratio and relationship features
+    """
+    df = transactions_df.copy()
+    
+    # Amount to average ratios
+    for col in [col for col in df.columns if 'AVG_AMOUNT' in col]:
+        df[f'RATIO_TO_{col}'] = df['TX_AMOUNT'] / df[col].replace(0, 1)
+    
+    # Transaction frequency ratios
+    for col in [col for col in df.columns if 'NB_TX' in col]:
+        window_size = col.split('_')[-2].replace('DAY', '')
+        df[f'TX_FREQ_RATIO_{window_size}'] = df[col] / float(window_size)
+    
+    return df
+
 
 def apply_smote_sampling(X_train, y_train, sampling_strategy=0.3, random_state=42):
     """
