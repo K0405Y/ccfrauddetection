@@ -1,8 +1,8 @@
 import pandas as pd  
 import numpy as np
 import datetime  
-from scipy.stats import skew, kurtosis
 from imblearn.over_sampling import SMOTE
+from prince import PCA
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -146,37 +146,32 @@ def get_velocity_features(transactions_df, time_windows=[1, 3, 6, 12, 24]):
     Create velocity features for different time windows (in hours)
     """
     features = transactions_df.copy()
+    features.sort_values(['CUSTOMER_ID', 'TX_DATETIME'], inplace=True)
     
     for window in time_windows:
-        # Convert window to timedelta
-        window_delta = pd.Timedelta(hours=window)
-        
-        # Create window start time
-        features[f'window_start_{window}h'] = features['TX_DATETIME'] - window_delta
-        
-        # Group by customer and calculate features
-        grouped = features.groupby('CUSTOMER_ID')
-        
-        # Number of transactions in window
-        features[f'tx_count_{window}h'] = grouped.apply(
-            lambda x: x.apply(
-                lambda row: len(x[(x['TX_DATETIME'] > row['window_start_{window}h']) & 
-                                (x['TX_DATETIME'] <= row['TX_DATETIME'])]), 
-                axis=1
-            )
-        )
-        
-        # Transaction amount velocity
-        features[f'amount_velocity_{window}h'] = grouped.apply(
-            lambda x: x.apply(
-                lambda row: x[(x['TX_DATETIME'] > row[f'window_start_{window}h']) & 
-                             (x['TX_DATETIME'] <= row['TX_DATETIME'])]['TX_AMOUNT'].sum(), 
-                axis=1
-            )
-        )
-        
-        # Drop temporary columns
-        features = features.drop(f'window_start_{window}h', axis=1)
+        # Calculate window features for each customer group
+        def calculate_window_stats(group):
+            # Convert to hours for comparison
+            group = group.copy()
+            group[f'tx_count_{window}h'] = 0
+            group[f'amount_velocity_{window}h'] = 0
+            
+            for idx in range(len(group)):
+                current_time = group.iloc[idx]['TX_DATETIME']
+                window_start = current_time - pd.Timedelta(hours=window)
+                
+                # Count transactions in window
+                window_mask = (group['TX_DATETIME'] > window_start) & (group['TX_DATETIME'] <= current_time)
+                group.iloc[idx, group.columns.get_loc(f'tx_count_{window}h')] = window_mask.sum()
+                
+                # Sum amounts in window
+                group.iloc[idx, group.columns.get_loc(f'amount_velocity_{window}h')] = \
+                    group.loc[window_mask, 'TX_AMOUNT'].sum()
+            
+            return group
+
+        # Apply calculations to each customer group
+        features = features.groupby('CUSTOMER_ID', group_keys=False).apply(calculate_window_stats)
     
     return features
 
@@ -245,26 +240,44 @@ def get_ratio_features(transactions_df):
     
     return df
 
+def run_pca(df2):    
+    pca = PCA(n_components=1, random_state=42, rescale_with_mean=True)
+    
+    # Fit PCA model to data
+    res_pca = pca.fit(df2)
+    
+    # Get variable contributions using column correlations
+    # This gives the correlation between original features and principal components
+    contributions = res_pca.column_correlations.iloc[:,0]**2  # Square for variance explained
+    contributions = contributions / contributions.sum()  # Normalize to sum to 1
+    
+    # Create Series with variable contributions
+    pca_var = pd.DataFrame({'Variable Contribution': contributions})
 
-def apply_smote_sampling(X_train, y_train, sampling_strategy=0.3, random_state=42):
+    #drop na values 
+    pca_var = pca_var.dropna()
+    
+    # Calculate the cumulative contribution
+    pca_var = pca_var.sort_values('Variable Contribution', ascending=False)# Sort by contribution
+
+    pca_var['Cumulative Contribution'] = pca_var['Variable Contribution'].cumsum()
+
+    # Select variables contributing up to 85%
+    pca_selected = pca_var[pca_var['Cumulative Contribution'] <= 0.85]
+
+    # Create a list of those variable names
+    pca_col = pca_selected.index.tolist()
+    print(pca_col)
+    return pca_col
+
+def apply_smote_sampling(X_train, y_train, sampling_strategy=0.7, random_state=42):
     """
     Apply SMOTE sampling to the training data.    
     
     """
-    # First apply mild undersampling to reduce majority class
-    # This helps with memory efficiency when dealing with large datasets
-    # rus = RandomUnderSampler(sampling_strategy=0.1, random_state=random_state)
-    
-    # Then apply SMOTE to increase minority class
+    # apply SMOTE to increase minority class
     smote = SMOTE(sampling_strategy=sampling_strategy, random_state=random_state)
     
-    # # Create a pipeline of the sampling steps
-    # pipeline = Pipeline([
-    #     ('undersampling', rus),
-    #     ('smote', smote)
-    # ])
-    
-    # Apply the resampling pipeline
     X_resampled, y_resampled = smote.fit_resample(X_train, y_train)
     
     return X_resampled, y_resampled

@@ -1,11 +1,11 @@
 import sys
 import os
-from src.preprocessing.prep import get_train_test_set, is_weekend, is_night, get_customer_spending_features, get_count_risk_rolling_window, apply_smote_sampling
+from src.preprocessing.prep import get_train_test_set, is_weekend, is_night, get_customer_spending_features, get_count_risk_rolling_window,get_network_features, get_velocity_features, get_time_pattern_features, get_statistical_features, get_ratio_features, run_pca, apply_smote_sampling
 import pandas as pd
 import numpy as np
 import datetime 
 from sklearn.model_selection import StratifiedKFold, RandomizedSearchCV
-from scipy.stats import randint, uniform, loguniform
+from scipy.stats import randint, uniform, loguniform, skew, kurtosis
 from sklearn.metrics import roc_auc_score, precision_score, accuracy_score, recall_score, f1_score, average_precision_score,precision_recall_curve, auc
 import xgboost as xgb
 import mlflow
@@ -213,7 +213,6 @@ class FraudDetectionXGBoost:
             random_search.fit(
                 X_train, 
                 y_train, 
-                eval_set=[(X_val, y_val)],
                 verbose=False
             )
 
@@ -247,12 +246,14 @@ class FraudDetectionXGBoost:
         self.xgb_model.fit(
             X_train, y_train,
             eval_set=[(X_val, y_val)],
+            eval_metric='aucpr',
+            objective='binary:logistic',
             verbose=False
         )
 
         # Compute validation probabilities and optimize classification threshold
         y_val_prob = self.xgb_model.predict_proba(X_val)[:, 1]
-        self.threshold = self._optimize_threshold(y_val, y_val_prob)
+        # self.threshold = self._optimize_threshold(y_val, y_val_prob)
 
         print(f"\nOptimized threshold: {self.threshold:.4f}")
 
@@ -316,37 +317,66 @@ def train_fraud_detection_system(raw_data):
     train_df, test_df = get_train_test_set(
         raw_data, 
         start_date_training=raw_data['TX_DATETIME'].min(),
-        delta_train=60,  
-        delta_delay=5,   
-        delta_test=28)   
+        delta_train=7,  
+        delta_delay=3,   
+        delta_test=7)   
 
     def prep_data(df, training=False):
+        """
+        Main data preparation pipeline combining all feature engineering steps
+        """
+        # Create copy to avoid modifying original
+        df = df.copy()
+        
+        # Basic temporal features
         df['TX_DURING_WEEKEND'] = df['TX_DATETIME'].apply(is_weekend)
         df['TX_DURING_NIGHT'] = df['TX_DATETIME'].apply(is_night)
-        df = df.groupby('CUSTOMER_ID').apply(lambda x: get_customer_spending_features(x, windows_size_in_days=[1, 7, 30]))
+        
+        # Apply all feature engineering functions
+        print("getting customer speeding features...")
+        df = get_customer_spending_features(df, windows_size_in_days=[1, 7, 30])
+        print("getting count risk features...")
+        df = get_count_risk_rolling_window(df, delay_period=7, windows_size_in_days=[1, 7, 30], feature="TERMINAL_ID")
+        print("getting network features...")
+        df = get_network_features(df)
+        print("getting velocity features...")
+        df = get_velocity_features(df)
+        print("getting time pattern features...")
+        df = get_time_pattern_features(df)
+        print("getting statistical features...")
+        df = get_statistical_features(df)
+        print("getting ratio features...")
+        df = get_ratio_features(df)
+        
+        # Sort by datetime and reset index
         df = df.sort_values('TX_DATETIME').reset_index(drop=True)
-        df = df.groupby('TERMINAL_ID').apply(lambda x: get_count_risk_rolling_window(x, delay_period=7, windows_size_in_days=[1, 7, 30], feature="TERMINAL_ID"))
-        df = df.sort_values('TX_DATETIME').reset_index(drop=True)
-        features = df.drop(['TX_DATETIME', 'TX_FRAUD', 'TX_FRAUD_SCENARIO'], axis=1).columns.to_list()
-        X = df.drop(['TX_DATETIME', 'TX_FRAUD', 'TX_FRAUD_SCENARIO'], axis=1).to_numpy()
-        y = df['TX_FRAUD'].to_numpy()
-        if training is True:
-            return X, y, features
-        return X, y
-    
+        
+        # Handle missing values
+        df = df.fillna(0)
+        
+        # Prepare output
+        feature_cols = df.drop(['TX_DATETIME', 'TX_FRAUD', 'TX_FRAUD_SCENARIO'], axis=1).columns.to_list()
+        X = df[feature_cols]
+        y = df['TX_FRAUD']
+
+        if training:
+            return X, y, feature_cols
+        return X, y    
 
     # ---- Step 2: Data Preprocessing ----
     print("Preprocessing training data...")
-    X_train, y_train, train_features = prep_data(train_df, training=True)
+    X_train, y_train, train_features = prep_data(train_df, training=True)  
+    print("   running pca...")
+    pca_cols = run_pca(X_train)
+    X_train = X_train[pca_cols]
 
     print("Applying SMOTE sampling...")
-    X_resampled, y_resampled = apply_smote_sampling(X_train, y_train)
+    X_resampled, y_resampled = apply_smote_sampling(X_train.to_numpy(), y_train.to_numpy())
 
     print("Preprocessing validation data...")
     # Split test set into validation and final test set while maintaining fraud ratio
     grouped = test_df.groupby('TX_FRAUD')
     test_df_final, val_df = [], []
-
     for _, group in grouped:
         mid = len(group) // 2  # Split each fraud/non-fraud group evenly
         test_df_final.append(group.iloc[:mid])  # First half goes to test set
@@ -355,9 +385,11 @@ def train_fraud_detection_system(raw_data):
     test_df_final = pd.concat(test_df_final, axis=0).reset_index(drop=True)
     val_df = pd.concat(val_df, axis=0).reset_index(drop=True)
     X_val, y_val = prep_data(val_df)
+    X_val = X_val[pca_cols]
 
     print("Preprocessing test data...")
     X_test, y_test = prep_data(test_df_final)
+    X_test = X_test[pca_cols]
 
     # ---- Step 3: Log Data Statistics ----
     print("\nData Statistics:")
@@ -381,10 +413,9 @@ def train_fraud_detection_system(raw_data):
 
     # ---- Step 4: Initialize XGBoost Model ----
     print("\nInitializing XGBoost model...")
-    feature_names = train_features  # Store feature names for reference
     model = FraudDetectionXGBoost(
         input_dim=X_resampled.shape[1],  # Set input dimensions
-        feature_names=feature_names
+        feature_names=pca_cols
     )
 
     # ---- Step 5: Train Model and Log with MLflow ----
@@ -411,7 +442,7 @@ def train_fraud_detection_system(raw_data):
         mlflow.log_metrics(test_metrics)
 
         # ---- Step 7: Log Trained Model to MLflow ----
-        input_example = pd.DataFrame(X_resampled[:1], columns=feature_names)  # Example input data
+        input_example = pd.DataFrame(X_resampled[:1], columns=pca_cols)  # Example input data
 
         # Log XGBoost model
         base_signature = mlflow.models.signature.infer_signature(
